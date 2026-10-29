@@ -49,8 +49,9 @@ Deno.serve(async (req) => {
 
   webpush.setVapidDetails((await secret('site_url')) || SUPABASE_URL, pub, priv);
 
-  const { data: due, error } = await sb.from('notifications').select('*')
-    .is('sent_at', null).is('error', null).lte('send_at', new Date().toISOString()).order('send_at').limit(100);
+  // Claiming rows with a single UPDATE means two overlapping cron runs can never send the same reminder twice.
+  const { data: due, error } = await sb.from('notifications').update({ error: 'sending' })
+    .is('sent_at', null).is('error', null).lte('send_at', new Date().toISOString()).select('*');
   if (error) return json({ error: error.message }, 500);
 
   let sent = 0, stale = 0, failed = 0;
@@ -84,7 +85,7 @@ Deno.serve(async (req) => {
         if (code === 404 || code === 410) await sb.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
       }
     }
-    await sb.from('notifications').update(delivered ? { sent_at: new Date().toISOString() } : { error: 'push failed' }).eq('id', n.id);
+    await sb.from('notifications').update(delivered ? { sent_at: new Date().toISOString(), error: null } : { error: 'push failed' }).eq('id', n.id);
     delivered ? sent++ : failed++;
   }
 
