@@ -1,5 +1,5 @@
 import { html, useState } from './lib.js';
-import { CATS, CAT_ORDER, DOW, DOW_LABEL, addDays, fmtDur, fmtRange, nowMin, slug, sortBlocks, startOfWeek, todayKey, toMin, fromMin, uid } from './util.js';
+import { CATS, CAT_ORDER, DOW, DOW_LABEL, addDays, fmtDur, fmtRange, nowMin, rxFor, slug, sortBlocks, startOfWeek, todayKey, toMin, fromMin, uid } from './util.js';
 import { Icon, Btn, Sheet, Field, CatPicker, Segmented, Empty, toast } from './ui.js';
 import { SessionPlan } from './workout.js';
 import * as M from './model.js';
@@ -40,7 +40,7 @@ function Sessions({ store, actions }) {
       </div>`)}</div>
     </div>`)}
     ${viewing && html`<${Sheet} open wide title=${viewing.title} onClose=${() => setViewing(null)}
-        footer=${html`<${Segmented} label="Week" value=${wk} onChange=${setWk} options=${Array.from({ length: program?.weeks || 4 }, (_, i) => [i + 1, `Wk${i + 1}`])} />
+        footer=${html`<${Segmented} label="Week" value=${wk} onChange=${setWk} options=${Array.from({ length: program?.weeks || 4 }, (_, i) => [i + 1, `Wk ${i + 1}`])} />
           <span class="grow"></span>
           <${Btn} kind="quiet" icon="copy" onClick=${() => { setEditing({ ...structuredClone(viewing), id: '', title: `${viewing.title} (copy)` }); setViewing(null); }}>Duplicate</${Btn}>
           <${Btn} kind="quiet" icon="edit" onClick=${() => { setEditing(structuredClone(viewing)); setViewing(null); }}>Edit</${Btn}>
@@ -73,7 +73,7 @@ function SessionEditor({ store, session, weeks, onClose }) {
   const save = () => {
     if (!s.title.trim()) return;
     const id = s.id || slug(s.title);
-    const clean = { ...s, id, title: s.title.trim(), duration: +s.duration || 60,
+    const clean = { ...s, id, title: s.title.trim(), duration: +s.duration || 60, remind: s.remind == null ? null : Math.max(0, Math.round(+s.remind)),
       parts: s.parts.map((p) => ({ ...p, items: p.items.filter((it) => it.name.trim()).map((it) => ({ ...it, name: it.name.trim(), byWeek: it.byWeek?.some(Boolean) ? it.byWeek : undefined })) })) };
     let finalId = id;
     if (!s.id) { let n = 2; while (store.get('sessions', finalId)) finalId = `${id}-${n++}`; clean.id = finalId; }
@@ -88,7 +88,7 @@ function SessionEditor({ store, session, weeks, onClose }) {
         <${Btn} kind="quiet" onClick=${onClose}>Cancel</${Btn}><${Btn} kind="primary" onClick=${save} disabled=${!s.title.trim()}>Save session</${Btn}>`}>
     <div class="form-grid">
       <${Field} label="Name" class="span-2"><input data-autofocus value=${s.title} onInput=${(e) => set({ title: e.target.value })} /></${Field}>
-      <${Field} label="Category" class="span-2"><${CatPicker} value=${s.cat} onChange=${(cat) => set({ cat })} only=${CAT_ORDER.filter((c) => CATS[c].training)} /></${Field}>
+      <${Field} label="Category" class="span-2" group><${CatPicker} value=${s.cat} onChange=${(cat) => set({ cat })} only=${CAT_ORDER.filter((c) => CATS[c].training)} /></${Field}>
       <${Field} label="Location"><input value=${s.location || ''} onInput=${(e) => set({ location: e.target.value })} /></${Field}>
       <${Field} label="Length (min)"><input type="number" min="5" step="5" value=${s.duration} onInput=${(e) => set({ duration: e.target.value })} /></${Field}>
       <${Field} label="Default reminder (min before, blank = off)"><input type="number" min="0" step="5" value=${s.remind ?? ''} onInput=${(e) => set({ remind: e.target.value === '' ? null : +e.target.value })} /></${Field}>
@@ -104,7 +104,7 @@ function SessionEditor({ store, session, weeks, onClose }) {
         <${Field} label="Rest between sets (sec)"><input type="number" min="0" step="15" value=${p.rest ?? ''} onInput=${(e) => setPart(pi, { rest: e.target.value === '' ? undefined : +e.target.value })} /></${Field}>
       </div>
       <div class="items-edit">
-        <div class="ie-head"><span>Exercise or drill</span><span>Type</span>${Array.from({ length: weeks }, (_, w) => html`<span>Wk${w + 1}</span>`)}<span></span></div>
+        <div class="ie-head" style=${`--weeks:${weeks}`}><span>Exercise or drill</span><span>Type</span>${Array.from({ length: weeks }, (_, w) => html`<span>Wk ${w + 1}</span>`)}<span></span></div>
         ${p.items.map((it, ii) => html`<div class="ie-row" style=${`--weeks:${weeks}`}>
           <span class="ie-name">
             <input value=${it.name} onInput=${(e) => setItem(pi, ii, { name: e.target.value })} placeholder="Exercise" aria-label="Exercise name" />
@@ -116,12 +116,12 @@ function SessionEditor({ store, session, weeks, onClose }) {
             </select>
             ${it.kind === 'reps' && html`<label class="inline small"><input type="checkbox" checked=${!!it.load} onChange=${(e) => setItem(pi, ii, { load: e.target.checked })} /> weight</label>`}
           </span>
-          ${Array.from({ length: weeks }, (_, w) => html`<input class="ie-wk" value=${it.byWeek?.[w] || ''} placeholder=${w ? it.byWeek?.[w - 1] || '' : '3x8'}
+          ${Array.from({ length: weeks }, (_, w) => html`<label class="ie-wk"><span>Wk ${w + 1}</span><input value=${it.byWeek?.[w] || ''} placeholder=${w ? rxFor({ byWeek: it.byWeek?.slice(0, w) }, w) : '3x8'}
               aria-label=${`Week ${w + 1} prescription`}
-              onInput=${(e) => { const byWeek = [...(it.byWeek || Array(weeks).fill(''))]; byWeek[w] = e.target.value; setItem(pi, ii, { byWeek }); }} />`)}
+              onInput=${(e) => { const byWeek = [...(it.byWeek || Array(weeks).fill(''))]; byWeek[w] = e.target.value; setItem(pi, ii, { byWeek }); }} /></label>`)}
           <span class="ie-tools">
-            <button type="button" class="icon-btn sm" onClick=${() => moveItem(pi, ii, -1)} aria-label="Move up">↑</button>
-            <button type="button" class="icon-btn sm" onClick=${() => moveItem(pi, ii, 1)} aria-label="Move down">↓</button>
+            <button type="button" class="icon-btn sm" onClick=${() => moveItem(pi, ii, -1)} aria-label="Move up"><${Icon} name="up" size=${16} /></button>
+            <button type="button" class="icon-btn sm" onClick=${() => moveItem(pi, ii, 1)} aria-label="Move down"><${Icon} name="down" size=${16} /></button>
             <button type="button" class="icon-btn sm" onClick=${() => setPart(pi, { items: p.items.filter((_, j) => j !== ii) })} aria-label="Remove"><${Icon} name="x" size=${14} /></button>
           </span>
         </div>`)}
@@ -138,6 +138,7 @@ function SessionEditor({ store, session, weeks, onClose }) {
 }
 
 const WD = [1, 2, 3, 4, 5, 6, 0];
+const dayLabel = (k) => DOW_LABEL[DOW.indexOf(k)];
 
 function TemplateEditor({ store, actions }) {
   const tpls = M.templatesList(store);
@@ -164,7 +165,7 @@ function TemplateEditor({ store, actions }) {
     const days = { ...tpl.days };
     for (const t of targets) days[t] = blocks.map((b) => ({ ...b }));
     save(days);
-    toast(`Copied ${d} to ${targets.join(', ')}`);
+    toast(`Copied ${dayLabel(d)} to ${targets.map(dayLabel).join(', ')}`);
   };
 
   return html`<div>
@@ -203,7 +204,7 @@ function TemplateEditor({ store, actions }) {
         const s = last ? Math.min(toMin(last.end), 1380) : 16 * 60;
         setBlocks([...blocks, { start: fromMin(s), end: fromMin(Math.min(1440, s + 60)), title: 'New block', cat: 'life', remind: null }]);
       }}>Add block</${Btn}>
-      <span class="muted small">Copy ${d} to:</span>
+      <span class="muted small">Copy ${dayLabel(d)} to:</span>
       ${WD.filter((i) => DOW[i] !== d).map((i) => html`<button class="chip" onClick=${() => copyTo([DOW[i]])}>${DOW_LABEL[i]}</button>`)}
     </div>
   </div>`;
@@ -236,9 +237,9 @@ function ProgramEditor({ store }) {
   if (!p) return html`<${Empty} title="No training block">Claude can set one up for you at your next check-in.</${Empty}>`;
   const save = () => {
     const weeks = Math.max(1, +p.weeks || 4);
-    const { deloadText, ...rest } = p;
+    const { deloadText, id, ...rest } = p;
     const next = { ...rest, weeks, deload: deloadText.split(',').map((x) => +x.trim()).filter((x) => x >= 1 && x <= weeks), end: addDays(p.start, weeks * 7 - 1) };
-    store.put('programs', p.id, next);
+    store.put('programs', id, next);
     toast('Training block saved');
   };
   return html`<div class="narrow">

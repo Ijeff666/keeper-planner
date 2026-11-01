@@ -7,6 +7,7 @@ import { Icon, Btn, Sheet, Field, CatPicker, Segmented, toast } from './ui.js';
 import * as M from './model.js';
 import { ls } from './store.js';
 import { DayTrack } from './workout.js';
+import { WellnessForm } from './views.js';
 
 const HOUR = 52;
 
@@ -62,7 +63,7 @@ export function CalendarView({ store, date, setDate, view, setView, actions, wid
         <button class="icon-btn" onClick=${() => step(-1)} aria-label="Previous"><${Icon} name="left" /></button>
         <button class="icon-btn" onClick=${() => step(1)} aria-label="Next"><${Icon} name="right" /></button>
         <h1 class="cal-label">${label}</h1>
-        ${pw && !pw.before && !pw.after && html`<span class=${`wk-chip ${pw.deload ? 'deload' : ''}`}>${pw.deload ? `Wk${pw.wk} · Deload` : `Wk ${pw.wk}/${program.weeks}`}</span>`}
+        ${pw && !pw.before && !pw.after && html`<span class=${`wk-chip ${pw.deload ? 'deload' : ''}`}>${pw.label}</span>`}
       </div>
       <div class="cal-tools">
         <${Segmented} label="View" value=${view} onChange=${setView}
@@ -92,18 +93,17 @@ function QuickAdd({ store, anchor }) {
 
   const add = () => {
     if (!res || res.error) return;
-    M.addBlockToDays(store, res.dates, res.block);
-    const dates = res.dates;
-    toast(`Added ${res.block.title} to ${dates.map((k) => fmtDate(k, { weekday: 'short', day: 'numeric' })).join(', ')}`);
+    for (const b of res.blocks) M.addBlockToDays(store, res.dates, b);
+    toast(`Added ${res.blocks.map((b) => b.title).join(' + ')} to ${res.dates.map((k) => fmtDate(k, { weekday: 'short', day: 'numeric' })).join(', ')}`);
     setText('');
   };
 
   return html`<form class="quick" onSubmit=${(e) => { e.preventDefault(); add(); }}>
     <${Icon} name="bolt" size=${18} />
     <input id="quick-add" value=${text} onInput=${(e) => setText(e.target.value)} autocomplete="off"
-      placeholder="Quick add: thu 4pm legs plyo · study 3-5 · sat 8:30-10:30 pickup" aria-label="Quick add a block" />
+      placeholder="Quick add: thu 4pm plyo legs · study 3-5 · sat 8:30-10:30 pickup" aria-label="Quick add a block" />
     ${res && html`<span class=${`quick-preview ${res.error ? 'err' : ''}`}>
-      ${res.error || html`${res.dates.map((k) => fmtDate(k, { weekday: 'short', month: 'short', day: 'numeric' })).join(', ')} · ${fmtRange(res.block.start, res.block.end)} · <b>${res.block.title}</b>${res.block.location ? ` · ${res.block.location}` : ''}`}
+      ${res.error || html`${res.dates.map((k) => fmtDate(k, { weekday: 'short', month: 'short', day: 'numeric' })).join(', ')} · ${res.blocks.map((b, i) => html`${i ? ', then ' : ''}${fmtRange(b.start, b.end)} <b>${b.title}</b>`)}${res.blocks.length === 1 && res.block.location ? ` · ${res.block.location}` : ''}`}
     </span>`}
     ${res && !res.error && html`<button class="btn btn-primary btn-sm" type="submit">Add</button>`}
   </form>`;
@@ -225,14 +225,10 @@ function TimeGrid({ store, days, view, today, settings, program, actions, onSwip
       }
       const original = st.block;
       const next = { ...original, start: fromMin(d.start), end: fromMin(d.end) };
-      if (d.day !== st.day) { M.removeBlock(store, st.day, original.id); M.upsertBlock(store, d.day, next); }
-      else M.upsertBlock(store, st.day, next);
+      M.moveBlock(store, st.day, d.day, next);
       toast(`${original.title}: ${d.day !== st.day ? fmtDate(d.day) + ' ' : ''}${fmtRange(next.start, next.end)}`, {
         action: 'Undo',
-        onAction: () => {
-          if (d.day !== st.day) { M.removeBlock(store, d.day, original.id); M.upsertBlock(store, st.day, original); }
-          else M.upsertBlock(store, st.day, original);
-        },
+        onAction: () => M.moveBlock(store, d.day, st.day, original),
       });
     };
     const cancel = (e) => {
@@ -338,7 +334,7 @@ function DayHead({ store, k, today, program, view, onOpen }) {
     <span class="dh-dow">${DOW_LABEL[dow(k)]}</span>
     <span class="dh-num">${parseKey(k).getDate()}</span>
     <span class="dh-tags">
-      ${showWk && html`<span class=${`wk-chip sm ${pw.deload ? 'deload' : ''}`}>${pw.deload ? 'Deload' : `Wk${pw.wk}`}</span>`}
+      ${showWk && html`<span class=${`wk-chip sm ${pw.deload ? 'deload' : ''}`}>${pw.deload ? 'Deload' : `Wk ${pw.wk}`}</span>`}
       ${day.note && html`<span class="dh-note" title=${day.note}><${Icon} name="note" size=${12} /></span>`}
       ${started ? html`<span class=${`dh-score ${s.pct === 1 ? 'full' : ''}`}>${s.done + s.partial}/${s.planned}</span>`
         : tm > 0 && html`<span class="dh-load">${fmtDur(tm)}</span>`}
@@ -361,8 +357,8 @@ function DayBanner({ store, k, actions }) {
   return html`<button class="day-banner" onClick=${() => actions.openDay(k)}><${Icon} name="note" size=${16} /><span>${day.note}</span></button>`;
 }
 
-const ST_MARK = { done: html`<${Icon} name="check" size=${11} />`, partial: '½', skipped: html`<${Icon} name="x" size=${11} />` };
-const ST_WORD = { done: 'done', partial: 'half done', skipped: 'skipped' };
+const ST_MARK = { done: html`<${Icon} name="check" size=${11} />`, partial: html`<${Icon} name="half" size=${11} />`, skipped: html`<${Icon} name="x" size=${11} />` };
+const ST_WORD = { done: 'done', partial: 'half', skipped: 'skipped' };
 
 function Blk({ it, gs, status, due, ghost, onDown, onOpen }) {
   const b = it.b;
@@ -434,8 +430,8 @@ export function BlockEditor({ store, state, onClose }) {
   const save = () => {
     if (!valid) return;
     const blk = { ...f, title: f.title.trim(), end: endFor(f.end) };
-    if (!state.isNew && date !== state.date) M.removeBlock(store, state.date, blk.id);
-    M.upsertBlock(store, date, blk);
+    if (!state.isNew && date !== state.date) M.moveBlock(store, state.date, date, blk);
+    else M.upsertBlock(store, date, blk);
     if (repeat?.days?.length && repeat.until > date) {
       const keys = rangeKeys(addDays(date, 1), repeat.until).filter((k) => repeat.days.includes(DOW[dow(k)]));
       if (keys.length) M.addBlockToDays(store, keys, blk);
@@ -470,7 +466,7 @@ export function BlockEditor({ store, state, onClose }) {
     </div>`}
     <div class="form-grid">
       <${Field} label="Title" class="span-2"><input data-autofocus value=${f.title || ''} onInput=${(e) => set({ title: e.target.value })} placeholder="What is it?" /></${Field}>
-      <${Field} label="Category" class="span-2"><${CatPicker} value=${f.cat} onChange=${(cat) => set({ cat })} /></${Field}>
+      <${Field} label="Category" class="span-2" group><${CatPicker} value=${f.cat} onChange=${(cat) => set({ cat })} /></${Field}>
       <${Field} label="Date"><input type="date" value=${date} onInput=${(e) => e.target.value && setDate(e.target.value)} /></${Field}>
       <${Field} label="Session plan">
         <select value=${f.sessionId || ''} onChange=${(e) => {
@@ -548,6 +544,7 @@ export function DaySheet({ store, date, onClose, onGo, actions }) {
         <${Btn} kind="quiet" onClick=${() => { saveNote(note); onGo(date); }}>Open day</${Btn}>
         <${Btn} kind="primary" onClick=${() => { saveNote(note); onClose(); }}>Done</${Btn}>`}>
     ${date <= todayKey() && day.blocks.length > 0 && html`<h3 class="sub">How it went</h3><${DayTrack} store=${store} date=${date} actions=${actions} />`}
+    ${date <= todayKey() && html`<h3 class="sub">Check-in</h3><${WellnessForm} key=${date} store=${store} date=${date} />`}
     <${Field} label="Instructions for the day" hint="Shows at the top of the day and on the Today tab.">
       <textarea data-autofocus rows="4" value=${note} onInput=${(e) => setNote(e.target.value)} onBlur=${() => saveNote(note)}
         placeholder="e.g. Deload week. Stop every set with 3 reps left."></textarea>

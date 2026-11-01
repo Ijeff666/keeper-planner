@@ -34,6 +34,7 @@ const P = {
   dumbbell: 'M3 10v4M6 7v10M18 7v10M21 10v4M6 12h12',
   up: 'M6 15l6-6l6 6',
   down: 'M6 9l6 6l6-6',
+  half: 'M12 4a8 8 0 1 0 0 16a8 8 0 0 0 0-16zM12 4v16M8.5 5v14M5.5 7.5v9',
 };
 
 export function Icon({ name, size = 20, class: cls = '' }) {
@@ -61,10 +62,13 @@ export function useDocked() {
 
 export function Sheet({ open, title, onClose, children, footer, wide, full, modal, class: cls = '' }) {
   const ref = useRef();
+  // The key listener lives across renders, so it reads the latest onClose (DaySheet's saves the note typed since it opened).
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   const docked = useDocked() && !modal;
   useEffect(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === 'Escape' && !e.defaultPrevented) onClose?.(); };
+    const onKey = (e) => { if (e.key === 'Escape' && !e.defaultPrevented) closeRef.current?.(); };
     window.addEventListener('keydown', onKey);
     const prev = document.activeElement;
     setTimeout(() => ref.current?.querySelector('[data-autofocus]')?.focus(), 30);
@@ -85,8 +89,12 @@ export function Sheet({ open, title, onClose, children, footer, wide, full, moda
   return html`<div class="sheet-wrap" onClick=${(e) => { if (e.target === e.currentTarget) onClose?.(); }}>${inner}</div>`;
 }
 
-export function Field({ label, hint, children, class: cls = '' }) {
-  return html`<label class=${`field ${cls}`}><span class="field-label">${label}</span>${children}${hint && html`<span class="field-hint">${hint}</span>`}</label>`;
+// A <label> passes taps on its caption to the first button inside it, so button groups get a plain wrapper.
+export function Field({ label, hint, children, class: cls = '', group }) {
+  const body = html`<span class="field-label">${label}</span>${children}${hint && html`<span class="field-hint">${hint}</span>`}`;
+  return group
+    ? html`<div class=${`field ${cls}`} role="group" aria-label=${label}>${body}</div>`
+    : html`<label class=${`field ${cls}`}>${body}</label>`;
 }
 
 export function CatPicker({ value, onChange, only }) {
@@ -110,21 +118,33 @@ export function Scale({ value, onChange, max = 5, labels, label }) {
   </div>`;
 }
 
-export function Stepper({ value, onChange, step = 1, min = 0, max = 999, suffix = '', label }) {
+// While empty, either button fills in `start`, so the usual value is one tap away instead of a climb from zero.
+export function Stepper({ value, onChange, step = 1, min = 0, max = 999, suffix = '', label, start }) {
   const v = value ?? '';
   const set = (n) => onChange(Math.min(max, Math.max(min, Math.round(n * 100) / 100)));
-  return html`<div class="stepper" aria-label=${label}>
-    <button type="button" onClick=${() => set((+v || 0) - step)} aria-label="Less">−</button>
+  const bump = (d) => set(v === '' && start != null ? start : (+v || 0) + d);
+  return html`<div class="stepper" role="group" aria-label=${label}>
+    <button type="button" onClick=${() => bump(-step)} aria-label="Less">−</button>
     <span class="stepper-val">${v === '' ? '–' : v}${v !== '' && suffix}</span>
-    <button type="button" onClick=${() => set((+v || 0) + step)} aria-label="More">+</button>
+    <button type="button" onClick=${() => bump(step)} aria-label="More">+</button>
   </div>`;
+}
+
+// Saves on change (blur or Enter) and holds what's typed until then, so a re-render mid-typing can't put the old value back.
+export function LazyInput({ value, onCommit, ...rest }) {
+  const [text, setText] = useState(null);
+  return html`<input ...${rest} value=${text ?? value ?? ''} onInput=${(e) => setText(e.target.value)}
+    onChange=${(e) => { onCommit(e.target.value); setText(null); }} />`;
 }
 
 export function Empty({ title, children, action }) {
   return html`<div class="empty"><p class="empty-title">${title}</p>${children && html`<p class="empty-text">${children}</p>`}${action}</div>`;
 }
 
-let pushToast = () => {};
+// Toasts raised before <Toasts> mounts (the first load shows a boot screen instead) wait here.
+const queued = [];
+const queue = (msg, opts) => { queued.push([msg, opts]); };
+let pushToast = queue;
 export const toast = (msg, opts = {}) => pushToast(msg, opts);
 export function Toasts() {
   const [items, setItems] = useState([]);
@@ -134,6 +154,8 @@ export function Toasts() {
       setItems((xs) => [...xs, { id, msg, action, onAction }]);
       setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== id)), ms);
     };
+    for (const [msg, opts] of queued.splice(0)) pushToast(msg, opts);
+    return () => { pushToast = queue; };
   }, []);
   return html`<div class="toasts" role="status" aria-live="polite">
     ${items.map((t) => html`<div class="toast" key=${t.id}><span>${t.msg}</span>
@@ -142,7 +164,9 @@ export function Toasts() {
 }
 
 let startRest = () => {};
+let stopRest = () => {};
 export const restTimer = (secs, label) => startRest(secs, label);
+export const endRest = () => stopRest();
 let audioCtx = null;
 function beep() {
   try {
@@ -161,12 +185,17 @@ export function RestTimer() {
       try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume?.(); } catch { /* ignore */ }
       setT({ end: Date.now() + secs * 1000, secs, label, done: false });
     };
+    stopRest = () => setT(null);
   }, []);
   useEffect(() => {
     if (!t) return;
+    // 'Go' stays up for a few seconds, then gets off the top bar.
+    if (t.done) { const id = setTimeout(() => setT(null), 8000); return () => clearTimeout(id); }
+    let rang = false;
     const id = setInterval(() => {
       tick((n) => n + 1);
-      if (!t.done && Date.now() >= t.end) {
+      if (!rang && Date.now() >= t.end) {
+        rang = true;
         navigator.vibrate?.([200, 100, 200]);
         beep();
         setT((x) => x && { ...x, done: true });
@@ -177,12 +206,16 @@ export function RestTimer() {
   if (!t) return null;
   const left = Math.max(0, Math.ceil((t.end - Date.now()) / 1000));
   const pct = 100 - (left / t.secs) * 100;
+  // Once rest has run out, the old end is in the past, so +30s counts from now.
+  const more = () => setT((x) => x && (x.done || x.end <= Date.now()
+    ? { ...x, end: Date.now() + 30000, secs: 30, done: false }
+    : { ...x, end: x.end + 30000, secs: x.secs + 30 }));
   return html`<div class=${`rest ${t.done ? 'rest-done' : ''}`} role="timer" aria-live="off">
     <div class="rest-bar" style=${`width:${pct}%`}></div>
     <${Icon} name="timer" size=${18} />
     <span class="rest-time">${t.done ? 'Go' : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`}</span>
     <span class="rest-label">${t.done ? 'Rest is over' : t.label || 'Rest'}</span>
-    <button onClick=${() => setT((x) => ({ ...x, end: x.end + 30000, secs: x.secs + 30, done: false }))}>+30s</button>
+    <button onClick=${more}>+30s</button>
     <button onClick=${() => setT(null)} aria-label="Dismiss timer"><${Icon} name="x" size=${16} /></button>
   </div>`;
 }

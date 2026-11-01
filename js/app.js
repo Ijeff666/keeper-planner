@@ -13,7 +13,7 @@ import * as M from './model.js';
 import { APP_VERSION } from './config.js';
 
 const TABS = [['today', 'Today', 'today'], ['calendar', 'Calendar', 'calendar'], ['gym', 'Gym', 'dumbbell'], ['progress', 'Progress', 'chart'], ['coach', 'Coach', 'coach'], ['library', 'Library', 'library']];
-const FINISHED = { done: 'Workout saved', partial: 'Saved as half done', skipped: 'Marked as skipped' };
+const FINISHED = { done: 'Workout saved', partial: 'Saved as half', skipped: 'Marked as skipped' };
 const STATUS_LABEL = { loading: 'Loading…', synced: 'Saved', syncing: 'Saving…', offline: 'Offline · saved on this device', local: 'Local mode', error: 'Sync problem' };
 
 let installPrompt = null;
@@ -111,11 +111,12 @@ function Main({ sb, session }) {
 
   useEffect(() => {
     const un = store.subscribe(setV);
-    store.onError = (m) => toast(`Not saved: ${m}`);
+    store.onError = (m) => toast(`Not saved yet, will retry: ${m}`);
+    store.onMerge = () => toast('Claude changed something you were editing. Both sets of changes are kept.', { ms: 6000 });
     store.load().then(() => {
       // Seed only when the server (or local mode) really has nothing, never from an offline miss.
       const ok = store.status === 'synced' || store.status === 'syncing' || store.status === 'local';
-      if (ok && store.isEmpty()) { store.putMany(starterDocs()); toast('Loaded your starter plan'); }
+      if (ok && store.isEmpty() && (!store.sb || store.loadedRows === 0)) { store.putMany(starterDocs()); toast('Loaded your starter plan'); }
       // FitTracker v1 data is only readable here if this app is served from v1's old address.
       const v1 = M.readFitTrackerLocal();
       if (ok && v1 && !ls.get('kp:ftImported')) {
@@ -128,14 +129,24 @@ function Main({ sb, session }) {
     });
     store.listen();
     const online = () => { store.flush(); if (Date.now() - store.lastLoad > 30000) store.load(); };
-    const vis = () => { if (document.visibilityState === 'visible') { store.flush(); if (Date.now() - store.lastLoad > 60000) store.load(); } };
+    const vis = () => {
+      if (document.visibilityState !== 'visible') { store.persistNow(); return; }
+      store.flush();
+      if (Date.now() - store.lastLoad > 60000) store.load();
+    };
+    const hide = () => store.persistNow();
     const hash = () => { const h = readHash(); setTabState(h.tab); if (h.date) { setCalDate(h.date); setCalViewState('day'); } };
     window.addEventListener('online', online);
     window.addEventListener('offline', () => store.setStatus('offline'));
     document.addEventListener('visibilitychange', vis);
+    window.addEventListener('pagehide', hide);
     window.addEventListener('hashchange', hash);
     navigator.serviceWorker?.addEventListener?.('message', (e) => { if (e.data?.type === 'open' && e.data.url) { location.hash = e.data.url.split('#')[1] || 'today'; } });
-    return () => { un(); store.stop(); window.removeEventListener('online', online); document.removeEventListener('visibilitychange', vis); window.removeEventListener('hashchange', hash); };
+    return () => {
+      un(); store.stop();
+      window.removeEventListener('online', online); document.removeEventListener('visibilitychange', vis);
+      window.removeEventListener('pagehide', hide); window.removeEventListener('hashchange', hash);
+    };
   }, [store]);
 
   const settings = M.getSettings(store);
@@ -162,24 +173,44 @@ function Main({ sb, session }) {
     },
     openDay: (date) => setSheet({ type: 'day', date }),
     openFill: (from) => setSheet({ type: 'fill', from }),
-    openWorkout: (date, id) => { setSheet(null); setActive({ date, id, open: true }); setTab('gym'); },
+    openWorkout: (date, id) => {
+      setSheet(null);
+      // The start time lives in kp:active, so leaving and resuming before the first set keeps the clock running.
+      setActive({ date, id, open: true, startedAt: active?.id === id ? active.startedAt : new Date().toISOString() });
+      setTab('gym');
+      const prev = active?.id !== id && active && M.blockLog(store, active.date, active.id);
+      if (prev && !prev.status && Object.keys(prev.items || {}).length) {
+        const title = M.getDay(store, active.date).blocks.find((b) => b.id === active.id)?.title || 'Your last workout';
+        const back = { ...active, open: true };
+        toast(`${title} is saved but not finished`, { ms: 8000, action: 'Switch back', onAction: () => setActive(back) });
+      }
+    },
     resumeWorkout: () => { if (active) { setActive({ ...active, open: true }); setTab('gym'); } },
     openQueue: () => setSheet({ type: 'queue' }),
     openSettings: () => setSheet({ type: 'settings' }),
   };
   const close = () => setSheet(null);
 
+  // A moved block keeps its id, so follow it to its new day, and bring its log along if the move (Claude's SQL,
+  // another phone) left it behind. A block marked done elsewhere ends the session here.
   useEffect(() => {
-    if (store.loaded && active && store.status !== 'loading' && !M.getDay(store, active.date).blocks.some((b) => b.id === active.id)) setActive(null);
-  }, [store.version]);
+    if (!store.loaded || !active || store.status === 'loading') return;
+    if (!M.getDay(store, active.date).blocks.some((b) => b.id === active.id)) {
+      const moved = Object.entries(store.all('days')).find(([, d]) => d.blocks?.some((b) => b.id === active.id));
+      if (moved) M.moveLog(store, active.date, moved[0], active.id);
+      setActive(moved ? { ...active, date: moved[0] } : null);
+      return;
+    }
+    if (M.blockLog(store, active.date, active.id)?.status && !(tab === 'gym' && active.open)) setActive(null);
+  }, [store.version, tab]);
 
   if (!store.loaded) return html`<div class="boot">Loading your plan…</div>`;
 
   const view = {
     today: html`<${TodayView} store=${store} actions=${actions} />`,
     gym: active?.open
-      ? html`<${WorkoutView} key=${active.id} store=${store} date=${active.date} blockId=${active.id}
-          onBack=${() => setActive({ ...active, open: false })}
+      ? html`<${WorkoutView} key=${active.id} store=${store} date=${active.date} blockId=${active.id} startedAt=${active.startedAt}
+          onBack=${() => setActive(M.blockLog(store, active.date, active.id)?.status ? null : { ...active, open: false })}
           onDone=${(status) => { setActive(null); if (status) toast(FINISHED[status]); }} />`
       : html`<${GymView} store=${store} actions=${actions} active=${active} />`,
     calendar: html`<${CalendarView} store=${store} date=${calDate} setDate=${setCalDate} view=${calView} setView=${setCalView} actions=${actions} wide=${wide} />`,
@@ -231,7 +262,7 @@ const b64ToU8 = (s) => {
 };
 const sameKey = (buf, u8) => { if (!buf) return false; const a = new Uint8Array(buf); return a.length === u8.length && a.every((v, i) => v === u8[i]); };
 
-async function enablePush(sb, userId) {
+async function enablePush(sb) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error('This browser can’t receive push notifications. On a phone, use Chrome.');
   const perm = await Notification.requestPermission();
   if (perm !== 'granted') throw new Error('Notifications are blocked. Allow them for this site in Chrome’s site settings, then try again.');
@@ -243,8 +274,21 @@ async function enablePush(sb, userId) {
   if (sub && !sameKey(sub.options?.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
   const j = sub.toJSON();
-  const { error: e2 } = await sb.from('push_subscriptions').upsert({ endpoint: j.endpoint, user_id: userId, keys: j.keys, ua: navigator.userAgent.slice(0, 180) }, { onConflict: 'endpoint' });
+  // Through a server function, because this phone may still be registered to an account that signed out of it.
+  const { error: e2 } = await sb.rpc('claim_push_subscription', { p_endpoint: j.endpoint, p_keys: j.keys, p_ua: navigator.userAgent.slice(0, 180) });
   if (e2) throw e2;
+}
+
+// Signing out stops this phone getting the account's reminders: its push registration goes before the session does.
+async function signOut(sb) {
+  try {
+    const sub = await (await navigator.serviceWorker?.getRegistration?.())?.pushManager?.getSubscription();
+    if (sub) {
+      await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+      await sub.unsubscribe();
+    }
+  } catch (e) { console.error('[push]', e); }
+  await sb.auth.signOut();
 }
 
 function SettingsSheet({ store, sb, session, onClose }) {
@@ -256,7 +300,7 @@ function SettingsSheet({ store, sb, session, onClose }) {
 
   const turnOn = async () => {
     setBusy(true);
-    try { await enablePush(sb, session.user.id); setPerm('granted'); toast('Reminders are on for this device'); }
+    try { await enablePush(sb); setPerm('granted'); toast('Reminders are on for this device'); }
     catch (e) { toast(e.message || 'Couldn’t turn on notifications'); setPerm(typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'); }
     setBusy(false);
   };
@@ -299,7 +343,7 @@ function SettingsSheet({ store, sb, session, onClose }) {
         <span class="theme-desc">${t.desc}</span>
       </button>`)}
     </div>
-    <${Field} label="Accent">
+    <${Field} label="Accent" group>
       <div class="accents" role="radiogroup" aria-label="Accent color">
         ${ACCENTS.map((a) => html`<button type="button" role="radio" aria-checked=${(s.accent || 'theme') === a.id} title=${a.name}
             class=${`accent-opt ${(s.accent || 'theme') === a.id ? 'on' : ''}`} onClick=${() => set({ accent: a.id })}>
@@ -308,7 +352,6 @@ function SettingsSheet({ store, sb, session, onClose }) {
       </div>
     </${Field}>
 
-    <h3 class="sub">Reminders</h3>
     <h3 class="sub">Reminders</h3>
     ${sb ? html`<div class="settings-row">
         <p>${perm === 'granted' ? 'Notifications are allowed on this device.' : perm === 'denied' ? 'Notifications are blocked for this site. Allow them in Chrome’s site settings.' : 'Get a reminder before each training block, plus messages from Claude.'}</p>
@@ -326,14 +369,14 @@ function SettingsSheet({ store, sb, session, onClose }) {
 
     <h3 class="sub">Calendar and tracking</h3>
     <div class="form-grid">
-      <${Field} label="Week starts"><${Segmented} label="Week starts" value=${s.weekStart ?? 1} onChange=${(v) => set({ weekStart: v })} options=${[[1, 'Monday'], [0, 'Sunday']]} /></${Field}>
+      <${Field} label="Week starts" group><${Segmented} label="Week starts" value=${s.weekStart ?? 1} onChange=${(v) => set({ weekStart: v })} options=${[[1, 'Monday'], [0, 'Sunday']]} /></${Field}>
       <${Field} label="Daily water goal">
         <select value=${String(s.waterGoal || 8)} onChange=${(e) => set({ waterGoal: +e.target.value })}>${[6, 8, 10, 12, 14].map((n) => html`<option value=${String(n)}>${n} cups</option>`)}</select>
       </${Field}>
       <${Field} label="Day starts at">
         <select value=${String(s.gridStart ?? 6)} onChange=${(e) => set({ gridStart: +e.target.value })}>${[0, 4, 5, 6, 7, 8].map((h) => html`<option value=${String(h)}>${h === 0 ? 'Midnight' : `${h}am`}</option>`)}</select>
       </${Field}>
-      <${Field} label="Weights in">
+      <${Field} label="Weights in" group>
         <${Segmented} label="Units" value=${s.units || 'lb'} onChange=${(v) => set({ units: v })} options=${[['lb', 'lb'], ['kg', 'kg']]} />
       </${Field}>
     </div>
@@ -356,7 +399,7 @@ function SettingsSheet({ store, sb, session, onClose }) {
     </div>
 
     <h3 class="sub">Account</h3>
-    ${sb ? html`<div class="settings-row"><p>${session.user.email}</p><${Btn} kind="quiet" onClick=${() => sb.auth.signOut()}>Sign out</${Btn}></div>`
+    ${sb ? html`<div class="settings-row"><p>${session.user.email}</p><${Btn} kind="quiet" onClick=${() => signOut(sb)}>Sign out</${Btn}></div>`
       : html`<p class="muted">Local mode: your data stays in this browser.</p>`}
     <p class="muted small">Version ${APP_VERSION} · ${STATUS_LABEL[store.status]}</p>
   </${Sheet}>`;

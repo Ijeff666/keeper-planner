@@ -1,9 +1,9 @@
 import { html, useState, useEffect, useMemo } from './lib.js';
 import {
   CATS, CAT_ORDER, DOW_LABEL, DOW_LONG, addDays, avg, dow, fmtDate, fmtDur, fmtRange, isTraining, nowMin, pad, parseKey,
-  programWeek, rangeKeys, sortBlocks, startOfWeek, toMin, todayKey, uid,
+  programWeek, rangeKeys, sortBlocks, startOfWeek, toKey, toMin, todayKey, uid,
 } from './util.js';
-import { Icon, Btn, Scale, Stepper, Empty, toast } from './ui.js';
+import { Icon, Btn, Scale, Stepper, LazyInput, Empty, toast } from './ui.js';
 import { LogQueue } from './workout.js';
 import * as M from './model.js';
 
@@ -21,18 +21,16 @@ export function TodayView({ store, actions }) {
   const nextTraining = blocks.find((b) => isTraining(b.cat) && toMin(b.end) > now && b !== next);
   const latest = Object.entries(store.all('checkins')).sort(([a], [b]) => (a < b ? 1 : -1))[0];
   const w = log.wellness || {};
-  const setW = (patch) => M.setWellness(store, today, patch);
   const tracked = blocks.filter(M.isTracked);
   const logged = tracked.filter((b) => log.blocks?.[b.id]?.status).length;
   const due = M.toLog(store, today, now, 7);
-  const waterGoal = settings.waterGoal || 8;
 
   return html`<section class="today">
     <header class="today-head">
       <h1 class="today-date">${DOW_LONG[dow(today)]}<span>${parseKey(today).toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}</span></h1>
       ${pw && !pw.before && !pw.after && html`<div class=${`scoreboard ${pw.deload ? 'deload' : ''}`}>
         <span class="sb-label">${program.name}</span>
-        <span class="sb-num">WK ${pw.wk}<small>/${program.weeks}</small></span>
+        <span class="sb-num">Wk ${pw.wk}<small>/${program.weeks}</small></span>
         ${pw.deload && html`<span class="sb-tag">Deload</span>`}
       </div>`}
     </header>
@@ -63,7 +61,7 @@ export function TodayView({ store, actions }) {
                 <span class="tl-time">${fmtRange(b.start, b.end)}</span>
                 <span class=${`dot cat-${b.cat}`}></span>
                 <span class="tl-title">${b.title}</span>
-                ${st && html`<span class=${`status-pill st-${st}`}>${st === 'partial' ? '½' : html`<${Icon} name=${st === 'done' ? 'check' : 'x'} size=${12} />`}</span>`}
+                ${st && html`<span class=${`status-pill st-${st}`}><${Icon} name=${st === 'done' ? 'check' : st === 'partial' ? 'half' : 'x'} size=${12} /></span>`}
               </button>
             </li>`;
           })}
@@ -72,20 +70,7 @@ export function TodayView({ store, actions }) {
 
       <div class="card">
         <div class="card-head"><h2>Check-in</h2><span class="muted small">${w.sleep != null || w.energy ? 'Saved' : '20 seconds'}</span></div>
-        <div class="wellness">
-          <div class="w-row"><span>Sleep last night</span><${Stepper} label="Sleep hours" value=${w.sleep} step=${0.5} max=${14} suffix="h" onChange=${(v) => setW({ sleep: v })} /></div>
-          <div class="w-row water"><span><${Icon} name="drop" size=${16} /> Water <b>${w.water || 0}</b>/${waterGoal}</span>
-            <span class="cups" role="group" aria-label="Cups of water">
-              ${Array.from({ length: waterGoal }, (_, i) => html`<button type="button" class=${`cup ${i < (w.water || 0) ? 'on' : ''}`} aria-label=${`${i + 1} cups`}
-                onClick=${() => setW({ water: (w.water || 0) === i + 1 ? i : i + 1 })}></button>`)}
-              <button type="button" class="cup-more" onClick=${() => setW({ water: (w.water || 0) + 1 })} aria-label="One more cup">+</button>
-            </span>
-          </div>
-          <div class="w-row"><span>Energy</span><${Scale} label="Energy" value=${w.energy} onChange=${(v) => setW({ energy: v })} labels=${['Drained', 'Low', 'OK', 'Good', 'Great']} /></div>
-          <div class="w-row"><span>Soreness</span><${Scale} label="Soreness" value=${w.soreness} onChange=${(v) => setW({ soreness: v })} labels=${['None', 'Light', 'Some', 'Sore', 'Very sore']} /></div>
-          <label class="w-row"><span>Pain or niggles</span><input value=${w.pain || ''} placeholder="Left hip flexor tight" onChange=${(e) => setW({ pain: e.target.value })} /></label>
-          <label class="w-row"><span>Bodyweight</span><input type="number" inputmode="decimal" step="0.1" value=${w.weight ?? ''} placeholder=${settings.units || 'lb'} onChange=${(e) => setW({ weight: e.target.value === '' ? null : +e.target.value })} /></label>
-        </div>
+        <${WellnessForm} store=${store} date=${today} />
       </div>
 
       ${latest && html`<button class="card coach-peek" onClick=${() => actions.go('coach')}>
@@ -95,6 +80,32 @@ export function TodayView({ store, actions }) {
       </button>`}
     </div>
   </section>`;
+}
+
+// The daily check-in. Today's tab shows it for today, and a past day's sheet shows it for that day, so a missed
+// morning can still be filled in and the month grids don't keep a gap.
+export function WellnessForm({ store, date }) {
+  const settings = M.getSettings(store);
+  const w = M.getLog(store, date).wellness || {};
+  const setW = (patch) => M.setWellness(store, date, patch);
+  const waterGoal = settings.waterGoal || 8;
+  // An empty sleep stepper starts from the last night logged, so a usual night is one tap.
+  const lastSleep = rangeKeys(addDays(date, -14), addDays(date, -1)).reverse().map((k) => M.getLog(store, k).wellness?.sleep).find((v) => typeof v === 'number');
+  return html`<div class="wellness">
+    <div class="w-row"><span>${date === todayKey() ? 'Sleep last night' : 'Sleep the night before'}</span><${Stepper} label="Sleep hours" value=${w.sleep} start=${lastSleep ?? 7.5} step=${0.5} max=${14} suffix="h" onChange=${(v) => setW({ sleep: v })} /></div>
+    <div class="w-row water"><span><${Icon} name="drop" size=${16} /> Water <b>${w.water || 0}</b>/${waterGoal}</span>
+      <span class="cups" role="group" aria-label="Cups of water">
+        ${Array.from({ length: waterGoal }, (_, i) => html`<button type="button" class=${`cup ${i < (w.water || 0) ? 'on' : ''}`} aria-label=${`${i + 1} cups`}
+          onClick=${() => setW({ water: (w.water || 0) === i + 1 ? i : i + 1 })}></button>`)}
+        <button type="button" class="cup-more" onClick=${() => setW({ water: (w.water || 0) + 1 })} aria-label="One more cup">+</button>
+      </span>
+    </div>
+    <div class="w-row"><span>Energy</span><${Scale} label="Energy" value=${w.energy} onChange=${(v) => setW({ energy: v })} labels=${['Drained', 'Low', 'OK', 'Good', 'Great']} /></div>
+    <div class="w-row"><span>Soreness</span><${Scale} label="Soreness" value=${w.soreness} onChange=${(v) => setW({ soreness: v })} labels=${['None', 'Light', 'Some', 'Sore', 'Very sore']} /></div>
+    <label class="w-row"><span>Pain or niggles</span><${LazyInput} value=${w.pain} placeholder="Left hip flexor tight" onCommit=${(v) => setW({ pain: v.trim() })} /></label>
+    <label class="w-row"><span>Bodyweight</span><${LazyInput} type="number" inputmode="decimal" step="0.1" value=${w.weight} placeholder=${settings.units || 'lb'}
+      onCommit=${(v) => setW({ weight: v === '' ? null : +v })} /></label>
+  </div>`;
 }
 
 function NextUp({ store, block, now, date, actions }) {
@@ -116,9 +127,11 @@ function NextUp({ store, block, now, date, actions }) {
   </div>`;
 }
 
+// Program weeks while a block is running; before or after one, the last four calendar weeks, so the chart keeps moving.
 function weeksForRange(program, today, ws) {
-  if (program?.start) {
-    const n = Math.max(1, Math.min(program.weeks, (programWeek(program, today)?.wk || 1)));
+  const pw = programWeek(program, today);
+  if (program?.start && pw && !pw.before && !pw.after) {
+    const n = Math.max(1, Math.min(program.weeks, pw.wk || 1));
     return Array.from({ length: program.weeks }, (_, i) => {
       const from = addDays(program.start, i * 7);
       return { label: `Wk ${i + 1}`, from, to: addDays(from, 6), future: i + 1 > n, deload: (program.deload || []).includes(i + 1) };
@@ -178,10 +191,13 @@ export function ProgressView({ store, actions }) {
   const units = settings.units || 'lb';
   const weekStart = settings.weekStart ?? 1;
   const weeks = weeksForRange(program, today, weekStart);
-  const stats = useMemo(() => weeks.map((wk) => ({ ...wk, ...breakdown(store, wk.from, wk.to) })), [store.version, weeks.length]);
+  const stats = useMemo(() => weeks.map((wk) => ({ ...wk, ...breakdown(store, wk.from, wk.to) })), [store.version, weeks[0]?.from, weeks.length]);
   const cur = stats.find((s) => today >= s.from && today <= s.to);
+  const [picked, setPicked] = useState(null);
+  const shown = stats.find((s) => s.from === picked) || cur || stats[stats.length - 1];
   const wsKey = startOfWeek(today, weekStart);
-  const thisWeek = M.rangeStats(store, wsKey, addDays(wsKey, 6));
+  // Same range as the highlighted week bar: the program week when one is running.
+  const thisWeek = cur ? M.rangeStats(store, cur.from, cur.to) : M.rangeStats(store, wsKey, addDays(wsKey, 6));
   const hrs = (m) => (m / 60).toFixed(1).replace(/\.0$/, '');
 
   const [month, setMonth] = useState(monthOf(today));
@@ -213,7 +229,7 @@ export function ProgressView({ store, actions }) {
         ${stats.map((s) => {
           const max = Math.max(1, ...stats.map((x) => x.planned));
           const seg = (v) => `${(v / max) * 100}%`;
-          return html`<div class=${`wk-bar ${s.future ? 'future' : ''}`}>
+          return html`<button type="button" class=${`wk-bar ${s.future ? 'future' : ''} ${s === shown ? 'on' : ''}`} onClick=${() => setPicked(s.from)} aria-pressed=${s === shown}>
             <span class="wk-bar-label">${s.label}${s.deload ? html`<small>deload</small>` : ''}</span>
             <span class="wk-bar-track">
               <span class="seg done" style=${`width:${seg(s.done)}`}></span>
@@ -222,11 +238,13 @@ export function ProgressView({ store, actions }) {
               <span class="seg open" style=${`width:${seg(s.planned - s.done - s.partial - s.skipped)}`}></span>
             </span>
             <span class="wk-bar-num">${s.planned ? Math.round(((s.done + s.partial / 2) / s.planned) * 100) : 0}%</span>
-          </div>`;
+          </button>`;
         })}
       </div>
-      ${cur && html`<div class="cat-split">
-        ${CAT_ORDER.filter((c) => cur.byCat[c]).map((c) => html`<span class=${`cat-stat cat-${c}`}><i class="dot"></i>${CATS[c].short} ${cur.byCat[c].done}/${cur.byCat[c].planned}</span>`)}
+      ${shown && html`<div class="cat-split">
+        <span class="cat-split-wk">${shown.label}</span>
+        ${CAT_ORDER.filter((c) => shown.byCat[c]).map((c) => html`<span class=${`cat-stat cat-${c}`}><i class="dot"></i>${CATS[c].short} ${shown.byCat[c].done}/${shown.byCat[c].planned}</span>`)}
+        ${!Object.keys(shown.byCat).length && html`<span class="muted">Nothing planned</span>`}
       </div>`}
     </div>
 
@@ -261,14 +279,14 @@ export function ProgressView({ store, actions }) {
       <div class="card">
         <div class="card-head"><h2>Bodyweight</h2>${weights.length > 1 && html`<span class="muted small">${weights.at(-1).v - weights[0].v >= 0 ? '+' : ''}${(weights.at(-1).v - weights[0].v).toFixed(1)} ${units} this month</span>`}</div>
         ${weights.length ? html`<${MonthLines} month=${month} n=${n} unit=${units} onPick=${actions.openDay} series=${[{ cls: 'weight', pts: weights }]} />`
-          : html`<p class="muted">Add your weight in the Today check-in and the month’s trend shows here.</p>`}
+          : html`<p class="muted">Log your weight in a daily check-in (Today, or tap a day) and the month’s trend shows here.</p>`}
       </div>
 
       <div class="card">
         <div class="card-head"><h2>Recovery</h2><span class="legend"><i class="lg-energy"></i>Energy <i class="lg-sore"></i>Soreness</span></div>
         ${energy.length || sore.length ? html`<${MonthLines} month=${month} n=${n} lo=${1} hi=${5} ticks=${[1, 3, 5]} onPick=${actions.openDay}
             series=${[{ cls: 'energy', pts: energy }, { cls: 'sore', pts: sore }]} />`
-          : html`<p class="muted">Rate energy and soreness in the Today check-in and they chart here.</p>`}
+          : html`<p class="muted">Rate energy and soreness in a daily check-in and they chart here.</p>`}
       </div>
     </div>
   </section>`;
@@ -309,7 +327,10 @@ function MonthLines({ month, n, series, lo, hi, ticks, unit = '', onPick }) {
     ${ticks.map((t) => html`<g><line x1=${pl} x2=${W - pr} y1=${y(t)} y2=${y(t)} class="grid" /><text x=${pl - 6} y=${y(t) + 4} class="axis" text-anchor="end">${t}</text></g>`)}
     ${series.map((s) => html`<g>
       <path d=${s.pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.k).toFixed(1)},${y(p.v).toFixed(1)}`).join('')} class=${`line ${s.cls}`} />
-      ${s.pts.map((p) => html`<circle cx=${x(p.k)} cy=${y(p.v)} r="4" class=${`pt pt-btn ${s.cls}`} onClick=${() => onPick(p.k)}><title>${fmtDate(p.k)}: ${p.v}${unit ? ` ${unit}` : ''}</title></circle>`)}
+      ${s.pts.map((p) => html`<g class="pt-btn" onClick=${() => onPick(p.k)}>
+        <circle cx=${x(p.k)} cy=${y(p.v)} r="14" class="pt-hit" />
+        <circle cx=${x(p.k)} cy=${y(p.v)} r="4" class=${`pt ${s.cls}`} />
+        <title>${fmtDate(p.k)}: ${p.v}${unit ? ` ${unit}` : ''}</title></g>`)}
     </g>`)}
     ${[1, 8, 15, 22, 29].filter((d) => d <= n).map((d) => html`<text x=${pl + ((d - 1) / Math.max(1, n - 1)) * (W - pl - pr)} y=${H - 6} class="axis" text-anchor="middle">${d}</text>`)}
   </svg></div>`;
@@ -372,7 +393,7 @@ export function CoachView({ store }) {
                 <div class="row-end"><${Btn} kind="quiet" onClick=${() => setEditing(null)}>Cancel</${Btn}><${Btn} kind="primary" onClick=${saveEdit}>Save</${Btn}></div>`
               : html`<p>${n.text}</p>
                 <div class="note-foot">
-                  <span class="muted small">${fmtDate(n.at.slice(0, 10), { month: 'short', day: 'numeric' })}${n.edited ? ' · edited' : ''}${n.from === 'fittracker' ? ' · from FitTracker' : ''}</span>
+                  <span class="muted small">${fmtDate(toKey(new Date(n.at)), { month: 'short', day: 'numeric' })}${n.edited ? ' · edited' : ''}${n.from === 'fittracker' ? ' · from FitTracker' : ''}</span>
                   <span class="grow"></span>
                   <button type="button" class="icon-btn sm" onClick=${() => setEditing({ id: n.id, text: n.text })} aria-label="Edit note"><${Icon} name="edit" size=${16} /></button>
                   <button type="button" class="icon-btn sm" onClick=${() => removeNote(n.id)} aria-label="Delete note"><${Icon} name="trash" size=${16} /></button>

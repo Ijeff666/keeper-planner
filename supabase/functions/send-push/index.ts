@@ -50,43 +50,53 @@ Deno.serve(async (req) => {
   webpush.setVapidDetails((await secret('site_url')) || SUPABASE_URL, pub, priv);
 
   // Claiming rows with a single UPDATE means two overlapping cron runs can never send the same reminder twice.
-  const { data: due, error } = await sb.from('notifications').update({ error: 'sending' })
-    .is('sent_at', null).is('error', null).lte('send_at', new Date().toISOString()).select('*');
+  // A claim older than five minutes belongs to a run that died, so it is taken back instead of being stuck forever.
+  const now = new Date();
+  const { data: due, error } = await sb.from('notifications').update({ error: 'sending', claimed_at: now.toISOString() })
+    .is('sent_at', null).lte('send_at', now.toISOString())
+    .or(`error.is.null,and(error.eq.sending,claimed_at.lt.${new Date(now.getTime() - 5 * 60 * 1000).toISOString()})`)
+    .select('*');
   if (error) return json({ error: error.message }, 500);
 
   let sent = 0, stale = 0, failed = 0;
   const subsByUser = new Map<string, { endpoint: string; keys: { p256dh: string; auth: string } }[]>();
 
   for (const n of due ?? []) {
-    if (Date.now() - new Date(n.send_at).getTime() > STALE_MS) {
-      await sb.from('notifications').update({ error: 'stale' }).eq('id', n.id);
-      stale++;
-      continue;
-    }
-    if (!subsByUser.has(n.user_id)) {
-      const { data } = await sb.from('push_subscriptions').select('endpoint, keys').eq('user_id', n.user_id);
-      subsByUser.set(n.user_id, data ?? []);
-    }
-    const subs = subsByUser.get(n.user_id)!;
-    if (!subs.length) {
-      await sb.from('notifications').update({ error: 'no device' }).eq('id', n.id);
-      failed++;
-      continue;
-    }
-    const payload = JSON.stringify({ title: n.title, body: n.body ?? '', url: n.url ?? './#today', tag: n.block_id ? `${n.day}:${n.block_id}` : undefined });
-    let delivered = false;
-    for (const s of subs) {
-      try {
-        await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload, { TTL: 1800, urgency: 'high' });
-        delivered = true;
-      } catch (e) {
-        const code = (e as { statusCode?: number }).statusCode;
-        // 404/410 mean the browser dropped this subscription for good.
-        if (code === 404 || code === 410) await sb.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
+    try {
+      if (Date.now() - new Date(n.send_at).getTime() > STALE_MS) {
+        await sb.from('notifications').update({ error: 'stale' }).eq('id', n.id);
+        stale++;
+        continue;
       }
+      if (!subsByUser.has(n.user_id)) {
+        const { data } = await sb.from('push_subscriptions').select('endpoint, keys').eq('user_id', n.user_id);
+        subsByUser.set(n.user_id, data ?? []);
+      }
+      const subs = subsByUser.get(n.user_id)!;
+      if (!subs.length) {
+        await sb.from('notifications').update({ error: 'no device' }).eq('id', n.id);
+        failed++;
+        continue;
+      }
+      const payload = JSON.stringify({ title: n.title, body: n.body ?? '', url: n.url ?? './#today', tag: n.block_id ? `${n.day}:${n.block_id}` : undefined });
+      let delivered = false;
+      for (const s of subs) {
+        try {
+          // A push service that never answers would otherwise hold every reminder behind it until the function is killed.
+          await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload, { TTL: 1800, urgency: 'high', timeout: 10000 });
+          delivered = true;
+        } catch (e) {
+          const code = (e as { statusCode?: number }).statusCode;
+          // 404/410 mean the browser dropped this subscription for good.
+          if (code === 404 || code === 410) await sb.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
+        }
+      }
+      await sb.from('notifications').update(delivered ? { sent_at: new Date().toISOString(), error: null } : { error: 'push failed' }).eq('id', n.id);
+      delivered ? sent++ : failed++;
+    } catch (e) {
+      await sb.from('notifications').update({ error: `failed: ${(e as Error).message}`.slice(0, 200) }).eq('id', n.id);
+      failed++;
     }
-    await sb.from('notifications').update(delivered ? { sent_at: new Date().toISOString(), error: null } : { error: 'push failed' }).eq('id', n.id);
-    delivered ? sent++ : failed++;
   }
 
   return json({ sent, stale, failed });

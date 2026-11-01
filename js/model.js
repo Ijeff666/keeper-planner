@@ -7,9 +7,11 @@ import { SETTINGS, LIFE_PRESETS, blocksForDay } from './seed.js';
 export const getSettings = (store) => ({ ...SETTINGS, lifePresets: LIFE_PRESETS, ...(store.get('settings', 'main') || {}) });
 export const saveSettings = (store, patch) => store.put('settings', 'main', { ...getSettings(store), ...patch });
 
+// The id comes from the row key: rows Claude writes by SQL carry no id field in their data.
 export function getProgram(store) {
   const s = getSettings(store);
-  return store.get('programs', s.activeProgram) || Object.values(store.all('programs'))[0] || null;
+  const id = s.activeProgram && store.get('programs', s.activeProgram) ? s.activeProgram : Object.keys(store.all('programs'))[0];
+  return id ? { ...store.get('programs', id), id } : null;
 }
 
 export function sessionsList(store) {
@@ -35,6 +37,54 @@ export function saveDay(store, k, patch) {
 export function upsertBlock(store, k, block) {
   const d = getDay(store, k);
   saveDay(store, k, { blocks: [...d.blocks.filter((b) => b.id !== block.id), block] });
+}
+// Moving a block to another day carries its log along, so sets and status stay attached to it.
+export function moveBlock(store, from, to, block) {
+  if (from === to) return upsertBlock(store, to, block);
+  const src = getDay(store, from), dst = getDay(store, to);
+  store.putMany([
+    ['days', from, { ...src, date: from, blocks: src.blocks.filter((b) => b.id !== block.id) }],
+    ['days', to, { ...dst, date: to, blocks: sortBlocks([...dst.blocks.filter((b) => b.id !== block.id), block]) }],
+    ...logMoveRows(store, from, to, block.id),
+  ]);
+}
+// A block can also change days without moveBlock (Claude's SQL, another device), leaving its log behind. If both days
+// end up with an entry, the newer one is kept so the sets are never counted twice.
+function logMoveRows(store, from, to, id) {
+  const a = blockLog(store, from, id);
+  if (!a || from === to) return [];
+  const b = blockLog(store, to, id);
+  const lf = getLog(store, from), lt = getLog(store, to);
+  const left = { ...(lf.blocks || {}) };
+  delete left[id];
+  const keep = b && (b.updatedAt || '') > (a.updatedAt || '') ? b : a;
+  return [['logs', from, { ...lf, date: from, blocks: left }], ['logs', to, { ...lt, date: to, blocks: { ...(lt.blocks || {}), [id]: keep } }]];
+}
+export function moveLog(store, from, to, id) {
+  const rows = logMoveRows(store, from, to, id);
+  if (rows.length) store.putMany(rows);
+}
+
+// Removes a workout's log, and its block too when the block only existed for it (started from Gym or Library).
+// Returns an undo that puts back just that entry and block.
+export function deleteWorkout(store, k, id) {
+  const day = getDay(store, k), log = getLog(store, k);
+  const block = day.blocks.find((b) => b.id === id);
+  const entry = log.blocks?.[id];
+  const blocks = { ...(log.blocks || {}) };
+  delete blocks[id];
+  const dropBlock = !!block?.adhoc;
+  store.putMany([
+    ...(entry ? [['logs', k, { ...log, date: k, blocks }]] : []),
+    ...(dropBlock ? [['days', k, { ...day, date: k, blocks: day.blocks.filter((b) => b.id !== id) }]] : []),
+  ]);
+  return () => {
+    const d = getDay(store, k), l = getLog(store, k);
+    store.putMany([
+      ...(entry ? [['logs', k, { ...l, date: k, blocks: { ...(l.blocks || {}), [id]: entry } }]] : []),
+      ...(dropBlock ? [['days', k, { ...d, date: k, blocks: sortBlocks([...d.blocks.filter((b) => b.id !== id), block]) }]] : []),
+    ]);
+  };
 }
 export function removeBlock(store, k, id) {
   const d = getDay(store, k);
@@ -195,7 +245,7 @@ export function weekStreak(store, today, weekStart = 1) {
 
 export function quickWorkout(store, k, nowM) {
   const start = Math.min(23 * 60, Math.floor(nowM / 15) * 15);
-  const block = { id: uid(), title: 'Workout', cat: 'gym', start: fromMin(start), end: fromMin(Math.min(1440, start + 60)), remind: null };
+  const block = { id: uid(), title: 'Workout', cat: 'gym', start: fromMin(start), end: fromMin(Math.min(1440, start + 60)), remind: null, adhoc: true };
   upsertBlock(store, k, block);
   return block.id;
 }
@@ -207,14 +257,14 @@ export function startWorkout(store, k, nowM, sessionId) {
   const planned = sortBlocks(getDay(store, k).blocks).find((b) => b.sessionId === sessionId && !log.blocks?.[b.id]?.status);
   if (planned) return planned.id;
   const ses = getSession(store, sessionId);
-  const block = { ...blockFromSession({ ...ses, id: sessionId }, getSettings(store), Math.min(23 * 60, Math.floor(nowM / 15) * 15)), remind: null };
+  const block = { ...blockFromSession({ ...ses, id: sessionId }, getSettings(store), Math.min(23 * 60, Math.floor(nowM / 15) * 15)), remind: null, adhoc: true };
   upsertBlock(store, k, block);
   return block.id;
 }
 
 export const isGymSession = (s) => ['gym', 'plyo'].includes(s.cat) || !!s.gym;
 
-// Every block log with sets in it, newest first.
+// A workout is an entry with done sets; a block that was only marked done (study, practice) is not one.
 export function workoutHistory(store, limit = 20) {
   const out = [];
   for (const k of Object.keys(store.all('logs')).sort().reverse()) {
@@ -290,7 +340,7 @@ export function importFitTracker(store, d) {
     (w.exercises || []).forEach((e, j) => {
       const name = e.name || e.exName;
       if (!name) return;
-      extra.push({ id: `x${j}`, name, kind: 'reps', load: true, muscle: v1Muscle(e.muscleGroup, name) });
+      extra.push({ id: `x${j}`, name, kind: 'reps', load: true, rx: `${Math.max(1, +e.sets || 1)}x${+e.reps || 10}`, muscle: v1Muscle(e.muscleGroup, name) });
       items[`x${j}`] = { name, sets: Array.from({ length: Math.max(1, +e.sets || 1) }, () => ({ w: +e.weight || null, r: +e.reps || null, done: true })) };
       n.sets += Math.max(1, +e.sets || 1);
     });
@@ -299,8 +349,9 @@ export function importFitTracker(store, d) {
     logOf(w.date).blocks[id] = { status: 'done', title: w.name || 'Workout', cat: 'gym', plannedMin: 60, extra, items, imported: 'fittracker', updatedAt: new Date().toISOString() };
     n.workouts++;
   }
+  // A day that already has a weight keeps it, so a second import changes nothing and a corrected weight stays corrected.
   for (const b of d.bodyweight || []) {
-    if (!isValidKey(b.date) || !(+b.weight)) continue;
+    if (!isValidKey(b.date) || !(+b.weight) || typeof (logs[b.date] || getLog(store, b.date)).wellness?.weight === 'number') continue;
     const log = logOf(b.date);
     log.wellness = { ...(log.wellness || {}), weight: +b.weight };
     n.weights++;

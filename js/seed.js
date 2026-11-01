@@ -296,7 +296,7 @@ const night = (at = '21:30') => [
 ];
 const practiceEvening = [
   b('17:30', '18:15', 'Dinner (carbs + protein)', 'meal', { note: 'About 2 hours before practice.' }),
-  b('18:45', '19:30', 'Warm-up + travel to practice', 'team', { remind: 15, note: 'Pre-practice warm-up is in the Team Practice session.' }),
+  b('18:45', '19:30', 'Warm-up + travel to practice', 'life', { remind: 15, note: 'Pre-practice warm-up is in the Team Practice session.' }),
   sb('19:30', '21:00', 'team-practice', { remind: null }),
   b('21:15', '21:45', 'Post-practice meal', 'meal'),
 ];

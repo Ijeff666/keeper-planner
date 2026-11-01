@@ -1,7 +1,7 @@
 import { html, useState, useMemo } from './lib.js';
 import {
-  MUSCLES, addDays, daysBetween, downloadFile, fmtDate, fmtDur, fmtRange, guessMuscle, muscleZone, nowMin, parseRx, rxFor, slug,
-  startOfWeek, todayKey, uid,
+  MUSCLES, addDays, daysBetween, downloadFile, fmtDate, fmtDur, fmtRange, fromMin, guessMuscle, muscleZone, nowMin, parseRx, rxFor, slug,
+  startOfWeek, toKey, todayKey, uid,
 } from './util.js';
 import { Icon, Btn, Sheet, Field, Empty, toast } from './ui.js';
 import { weekFor } from './workout.js';
@@ -61,7 +61,7 @@ export function GymView({ store, actions, active }) {
 
     <section>
       <h2 class="section-title">History</h2>
-      <${History} items=${recent.slice(0, 12)} units=${units} actions=${actions} />
+      <${History} store=${store} items=${recent.slice(0, 12)} units=${units} actions=${actions} />
     </section>
 
     <div class="progress-grid">
@@ -89,7 +89,7 @@ function PlanCard({ store, plan, wk, units, onStart, onEdit }) {
     </div>
     <p class="meta">${items.length} exercises · ${fmtDur(plan.duration || 60)}${last ? ` · last done ${fmtDate(last, { month: 'short', day: 'numeric' })}` : ''}</p>
     <ul class="plan-peek">
-      ${items.slice(0, 5).map((it) => html`<li><span>${it.name}</span><span class="rx">${rxFor(it, wk)}${it.weight ? ` @ ${it.weight}` : ''}</span></li>`)}
+      ${items.slice(0, 5).map((it) => html`<li><span>${it.name}</span><span class="rx">${rxFor(it, wk)}${it.weight && it.kind !== 'time' ? ` @ ${it.weight}` : ''}</span></li>`)}
       ${items.length > 5 && html`<li class="muted">and ${items.length - 5} more</li>`}
     </ul>
     <div class="plan-foot">
@@ -99,7 +99,20 @@ function PlanCard({ store, plan, wk, units, onStart, onEdit }) {
   </article>`;
 }
 
-function History({ items, units, actions }) {
+// A log outlives its block when the block is deleted, so editing one first puts the block back where the workout happened.
+function editLog(store, actions, w) {
+  if (!M.getDay(store, w.k).blocks.some((b) => b.id === w.blockId)) {
+    const t = w.entry.startedAt ? new Date(w.entry.startedAt) : null;
+    const start = t && toKey(t) === w.k ? Math.floor((t.getHours() * 60 + t.getMinutes()) / 15) * 15 : 17 * 60;
+    M.upsertBlock(store, w.k, {
+      id: w.blockId, title: w.entry.title || 'Workout', cat: w.entry.cat || 'gym', sessionId: w.entry.sessionId || null,
+      start: fromMin(start), end: fromMin(Math.min(1440, start + (w.entry.plannedMin || 60))), remind: null,
+    });
+  }
+  actions.openWorkout(w.k, w.blockId);
+}
+
+function History({ store, items, units, actions }) {
   const [open, setOpen] = useState(null);
   if (!items.length) return html`<p class="muted">Finished workouts land here with every set.</p>`;
   return html`<ul class="history">
@@ -109,13 +122,13 @@ function History({ items, units, actions }) {
       return html`<li class="hist" key=${key}>
         <button type="button" class="hist-head" onClick=${() => setOpen(isOpen ? null : key)} aria-expanded=${isOpen}>
           <span class="hist-title">${w.entry.title || 'Workout'}</span>
-          <span class="meta">${fmtDate(w.k, { weekday: 'short', month: 'short', day: 'numeric' })} · ${w.sets} sets${w.vol ? ` · ${Math.round(w.vol).toLocaleString()} ${units}` : ''}</span>
+          <span class="meta">${fmtDate(w.k, { weekday: 'short', month: 'short', day: 'numeric' })} · ${w.sets} set${w.sets === 1 ? '' : 's'}${w.vol ? ` · ${Math.round(w.vol).toLocaleString()} ${units}` : ''}</span>
           <${Icon} name=${isOpen ? "up" : "down"} size=${16} />
         </button>
         ${isOpen && html`<div class="hist-body">
           ${w.items.map((x) => html`<div class="hist-row"><span>${x.name}</span><span class="mono">${x.log.sets.filter((s) => s.done).map(fmtSet).join('  ')}</span></div>`)}
           ${w.entry.note && html`<p class="meta">${w.entry.note}</p>`}
-          <div class="row-gap"><${Btn} kind="quiet" icon="edit" onClick=${() => actions.openWorkout(w.k, w.blockId)}>Edit log</${Btn}><${Btn} kind="quiet" onClick=${() => actions.openDay(w.k)}>See the day</${Btn}></div>
+          <div class="row-gap"><${Btn} kind="quiet" icon="edit" onClick=${() => editLog(store, actions, w)}>Edit log</${Btn}><${Btn} kind="quiet" onClick=${() => actions.openDay(w.k)}>See the day</${Btn}><span class="grow"></span><${Btn} kind="danger" icon="trash" onClick=${() => { const undo = M.deleteWorkout(store, w.k, w.blockId); setOpen(null); toast(`Deleted ${w.entry.title || 'workout'}`, { action: 'Undo', onAction: undo, ms: 6000 }); }}>Delete</${Btn}></div>
         </div>`}
       </li>`;
     })}
@@ -183,8 +196,10 @@ export function LineChart({ points, units, onPick, H = 190 }) {
     ${[lo, (lo + hi) / 2, hi].map((t) => html`<g><line x1=${pl} x2=${W - pr} y1=${y(t)} y2=${y(t)} class="grid" /><text x=${pl - 8} y=${y(t) + 4} class="axis" text-anchor="end">${Math.round(t)}</text></g>`)}
     <path d=${`${path}L${x(last).toFixed(1)},${H - pb}L${x(0).toFixed(1)},${H - pb}Z`} class="area" />
     <path d=${path} class="line" />
-    ${points.map((p, i) => html`<circle cx=${x(i)} cy=${y(p.w)} r=${i === last ? 5 : 3.5} class=${`pt ${i === last ? 'end' : ''} ${onPick ? 'pt-btn' : ''}`}
-        onClick=${onPick ? () => onPick(p.k) : null}><title>${fmtDate(p.k)}: ${p.w}${p.r ? ` × ${p.r}` : ''} ${units}</title></circle>`)}
+    ${points.map((p, i) => html`<g class=${onPick ? 'pt-btn' : ''} onClick=${onPick ? () => onPick(p.k) : null}>
+        ${onPick && html`<circle cx=${x(i)} cy=${y(p.w)} r="14" class="pt-hit" />`}
+        <circle cx=${x(i)} cy=${y(p.w)} r=${i === last ? 5 : 3.5} class=${`pt ${i === last ? 'end' : ''}`} />
+        <title>${fmtDate(p.k)}: ${p.w}${p.r ? ` × ${p.r}` : ''} ${units}</title></g>`)}
     ${points.length > 1 && html`<text x=${x(0)} y=${H - 6} class="axis" text-anchor="start">${fmtDate(points[0].k, { month: 'short', day: 'numeric' })}</text>`}
     <text x=${x(last)} y=${H - 6} class="axis" text-anchor=${points.length > 1 ? 'end' : 'middle'}>${fmtDate(points[last].k, { month: 'short', day: 'numeric' })}</text>
   </svg></div>`;
@@ -192,6 +207,13 @@ export function LineChart({ points, units, onPick, H = 190 }) {
 
 
 const blankPlan = () => ({ id: '', title: '', cat: 'gym', location: '', duration: 60, parts: [{ name: 'Exercises', rest: 90, items: [] }] });
+
+// Holds what's typed while editing, so clearing a field to type a new number doesn't snap back to the old one.
+function NumInput({ value, onCommit, ...rest }) {
+  const [text, setText] = useState(null);
+  return html`<input type="number" inputmode="numeric" ...${rest} value=${text ?? value ?? ''}
+    onInput=${(e) => { setText(e.target.value); if (+e.target.value > 0) onCommit(+e.target.value); }} onBlur=${() => setText(null)} />`;
+}
 const newItem = () => ({ id: uid('i'), name: '', kind: 'reps', load: true, rx: '3x10', weight: null, muscle: '' });
 
 // Program sessions carry a prescription per week; workouts built here use one sets x reps target and an optional weight.
@@ -230,7 +252,7 @@ function PlanEditor({ store, plan, wk, onClose }) {
     <div class="form-grid">
       <${Field} label="Name" class="span-2"><input data-autofocus value=${s.title} onInput=${(e) => setS((x) => ({ ...x, title: e.target.value }))} placeholder="Push day" /></${Field}>
       <${Field} label="Where"><input value=${s.location || ''} onInput=${(e) => setS((x) => ({ ...x, location: e.target.value }))} placeholder="YMCA" /></${Field}>
-      <${Field} label="Minutes"><input type="number" inputmode="numeric" min="5" step="5" value=${s.duration} onInput=${(e) => setS((x) => ({ ...x, duration: +e.target.value || 60 }))} /></${Field}>
+      <${Field} label="Minutes"><${NumInput} min="5" step="5" value=${s.duration} onCommit=${(duration) => setS((x) => ({ ...x, duration }))} /></${Field}>
     </div>
     <datalist id="kp-plan-names">${names.map((n) => html`<option value=${n} />`)}</datalist>
     ${s.parts.map((p, pi) => html`<div class="pe-part">
@@ -249,12 +271,12 @@ function PlanEditor({ store, plan, wk, onClose }) {
             </span>
           </div>
           ${it.byWeek ? html`<div class="pe-weeks">
-              ${it.byWeek.map((v, w) => html`<label class=${w + 1 === wk ? 'now' : ''}><span>Wk${w + 1}</span><input value=${v} onInput=${(e) => { const byWeek = [...it.byWeek]; byWeek[w] = e.target.value; setItem(pi, ii, { byWeek }); }} /></label>`)}
+              ${it.byWeek.map((v, w) => html`<label class=${w + 1 === wk ? 'now' : ''}><span>Wk ${w + 1}</span><input value=${v} onInput=${(e) => { const byWeek = [...it.byWeek]; byWeek[w] = e.target.value; setItem(pi, ii, { byWeek }); }} /></label>`)}
             </div>`
             : it.kind === 'check' ? null
             : html`<div class="pe-nums">
-              <label><span>Sets</span><input type="number" inputmode="numeric" min="1" value=${rx.sets ?? ''} onInput=${(e) => setRx(+e.target.value, timed ? rx.secs : rx.reps)} /></label>
-              <label><span>${timed ? 'Seconds' : 'Reps'}</span><input type="number" inputmode="numeric" min="1" value=${(timed ? rx.secs : rx.reps) ?? ''} onInput=${(e) => setRx(rx.sets, +e.target.value)} /></label>
+              <label><span>Sets</span><${NumInput} min="1" value=${rx.sets} onCommit=${(n) => setRx(n, timed ? rx.secs : rx.reps)} /></label>
+              <label><span>${timed ? 'Seconds' : 'Reps'}</span><${NumInput} min="1" value=${timed ? rx.secs : rx.reps} onCommit=${(n) => setRx(rx.sets, n)} /></label>
               ${!timed && html`<label><span>Weight</span><input type="number" inputmode="decimal" min="0" step="2.5" value=${it.weight ?? ''} placeholder="BW" onInput=${(e) => setItem(pi, ii, { weight: e.target.value === '' ? null : +e.target.value })} /></label>`}
             </div>`}
           <div class="pe-opts">
@@ -262,7 +284,7 @@ function PlanEditor({ store, plan, wk, onClose }) {
               <option value="">${guessMuscle(it.name) ? `Muscle: ${guessMuscle(it.name)}` : 'Muscle'}</option>
               ${MUSCLES.map((m) => html`<option value=${m}>${m}</option>`)}
             </select>
-            ${!it.byWeek && it.kind !== 'check' && html`<select value=${it.kind} onChange=${(e) => { const kind = e.target.value; setItem(pi, ii, { kind, load: kind === 'reps', rx: kind === 'time' ? `${rx.sets || 3}x30 sec` : `${rx.sets || 3}x10` }); }} aria-label="Type">
+            ${!it.byWeek && it.kind !== 'check' && html`<select value=${it.kind} onChange=${(e) => { const kind = e.target.value; setItem(pi, ii, { kind, load: kind === 'reps', rx: kind === 'time' ? `${rx.sets || 3}x30 sec` : `${rx.sets || 3}x10`, ...(kind === 'time' ? { weight: null } : {}) }); }} aria-label="Type">
               <option value="reps">Reps</option><option value="time">Timed</option>
             </select>`}
           </div>

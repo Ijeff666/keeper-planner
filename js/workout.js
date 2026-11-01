@@ -1,10 +1,10 @@
 import { html, useState, useEffect, useRef, useMemo } from './lib.js';
 import { CATS, MUSCLES, e1rm, fmtDate, fmtRange, guessMuscle, isTraining, parseRx, partNoteFor, programWeek, rxFor, debounce, todayKey, uid } from './util.js';
-import { Icon, Btn, Sheet, Scale, Segmented, Field, Empty, toast, restTimer } from './ui.js';
+import { Icon, Btn, Sheet, Scale, Segmented, Field, Empty, toast, restTimer, endRest } from './ui.js';
 import { ls } from './store.js';
 import * as M from './model.js';
 
-const STATUS = { done: 'Done', partial: 'Partial', skipped: 'Skipped' };
+const STATUS = { done: 'Done', partial: 'Half', skipped: 'Skipped' };
 const LOGGABLE = ['gym', 'plyo'];
 
 export function weekFor(program, date) {
@@ -43,12 +43,12 @@ export function BlockSheet({ store, date, blockId, onClose, actions }) {
       ${entry?.status && html`<span class=${`status-pill st-${entry.status}`}>${STATUS[entry.status]}${entry.rpe ? ` · RPE ${entry.rpe}` : ''}</span>`}
     </div>
     ${block.remind != null && html`<p class="muted small"><${Icon} name="bell" size=${14} /> Reminder ${block.remind === 0 ? 'at start' : `${block.remind} min before`}${block.remindNote ? ` · ${block.remindNote}` : ''}</p>`}
-    ${day.note && html`<div class="callout"><b>Today:</b> ${day.note}</div>`}
+    ${day.note && html`<div class="callout"><b>${dayWord(date)}:</b> ${day.note}</div>`}
     ${block.note && html`<div class="callout"><b>This block:</b> ${block.note}</div>`}
     ${entry?.note && html`<div class="callout logged"><b>Your note:</b> ${entry.note}</div>`}
-    ${sum?.sets > 0 && html`<p class="logged-sum"><${Icon} name="dumbbell" size=${16} /> ${sum.sets} sets logged${sum.vol ? ` · ${Math.round(sum.vol).toLocaleString()} ${M.getSettings(store).units || 'lb'} volume` : ''}${entry.finishedAt && entry.startedAt ? ` · ${Math.round((new Date(entry.finishedAt) - new Date(entry.startedAt)) / 60000)} min` : ''}</p>`}
+    ${sum?.sets > 0 && html`<p class="logged-sum"><${Icon} name="dumbbell" size=${16} /> ${sum.sets} set${sum.sets === 1 ? '' : 's'} logged${sum.vol ? ` · ${Math.round(sum.vol).toLocaleString()} ${M.getSettings(store).units || 'lb'} volume` : ''}${entry.finishedAt && entry.startedAt ? ` · ${Math.round((new Date(entry.finishedAt) - new Date(entry.startedAt)) / 60000)} min` : ''}</p>`}
     ${session ? html`<${SessionPlan} session=${session} wk=${wk} />`
-      : canLog ? html`<p class="muted">No preset on this block. Tap <b>Log sets</b> and add exercises as you go.</p>`
+      : canLog ? html`<p class="muted">No session plan on this block. Tap <b>Log sets</b> and add exercises as you go.</p>`
       : !train && html`<p class="muted">Life block. Edit it to change the time or add a reminder.</p>`}
   </${Sheet}>`;
 }
@@ -82,7 +82,7 @@ export function StatusButtons({ store, date, block, status, compact }) {
   const b = (st, label, icon) => html`<button type="button" class=${`st-btn st-${st} ${status === st ? 'on' : ''}`} onClick=${() => set(st)}
       aria-pressed=${status === st} title=${STATUS[st]}>${icon ? html`<${Icon} name=${icon} size=${16} />` : ''}${!compact || !icon ? html`<span>${label}</span>` : ''}</button>`;
   return html`<div class=${`st-btns ${compact ? 'compact' : ''}`} role="group" aria-label="Status">
-    ${b('done', 'Done', 'check')}${b('partial', compact ? '½' : 'Half')}${b('skipped', compact ? 'Skip' : 'Skipped')}
+    ${b('done', 'Done', 'check')}${b('partial', 'Half')}${b('skipped', compact ? 'Skip' : 'Skipped')}
   </div>`;
 }
 
@@ -127,8 +127,6 @@ export function DayTrack({ store, date, actions }) {
   const day = M.getDay(store, date);
   const log = M.getLog(store, date);
   const s = M.dayStats(store, date);
-  const units = M.getSettings(store).units || 'lb';
-  const w = log.wellness || {};
   const tracked = day.blocks.filter(M.isTracked);
   const h = (m) => `${(m / 60).toFixed(m % 60 ? 1 : 0)}h`;
   return html`<div class="day-track">
@@ -136,10 +134,6 @@ export function DayTrack({ store, date, actions }) {
       <span><b>${s.done + s.partial}</b>/${s.planned} logged</span>
       ${s.trainPlan > 0 && html`<span>Training <b>${h(s.trainDone)}</b> of ${h(s.trainPlan)}</span>`}
       ${s.studyPlan > 0 && html`<span>Study <b>${h(s.studyDone)}</b> of ${h(s.studyPlan)}</span>`}
-      ${w.sleep != null && html`<span>Sleep <b>${w.sleep}h</b></span>`}
-      ${w.energy && html`<span>Energy <b>${w.energy}</b>/5</span>`}
-      ${w.water != null && html`<span>Water <b>${w.water}</b> cups</span>`}
-      ${w.weight && html`<span>Weight <b>${w.weight}</b> ${units}</span>`}
     </div>
     ${tracked.length ? html`<ul class="queue">
       ${tracked.map((b) => {
@@ -149,7 +143,7 @@ export function DayTrack({ store, date, actions }) {
           <button type="button" class="queue-what" onClick=${() => actions.openBlock(date, b.id)}>
             <span class=${`dot cat-${b.cat}`}></span>
             <span class="queue-title">${b.title}</span>
-            <span class="queue-when">${fmtRange(b.start, b.end)}${sum?.sets ? ` · ${sum.sets} sets` : ''}${entry?.rpe ? ` · RPE ${entry.rpe}` : ''}</span>
+            <span class="queue-when">${fmtRange(b.start, b.end)}${sum?.sets ? ` · ${sum.sets} set${sum.sets === 1 ? '' : 's'}` : ''}${entry?.rpe ? ` · RPE ${entry.rpe}` : ''}</span>
           </button>
           <span class="queue-acts"><${StatusButtons} store=${store} date=${date} block=${b} status=${entry?.status} compact /></span>
         </li>`;
@@ -160,10 +154,16 @@ export function DayTrack({ store, date, actions }) {
 
 // Two ways to log the same data: Focus (one set at a time, big buttons, for the gym floor) and List (everything at once).
 
-const isSetRow = (row) => row.kind !== 'check' && !!row.p.sets;
+// Reps and timed items always log as sets, even when the prescription is free text ('AMRAP') or missing (FitTracker imports).
+const isSetRow = (row) => row.kind !== 'check' && (!!row.p.sets || row.kind === 'reps' || row.kind === 'time' || !!row.log?.sets?.length);
+const setCount = (row) => Math.max(row.p.sets || 0, row.log?.sets?.length || 0) || 1;
 const doneOf = (row) => (row.log?.sets || []).filter((s) => s.done);
 
-// Pre-fill for set i: what's already typed, then this session's previous set, then the plan, then last time.
+// The plan's target weight belongs to the planned lift, not to one swapped in for today or to a timed hold.
+const planWeight = (row) => (row.swapped || !row.load || row.kind === 'time' ? null : row.it.weight ?? null);
+
+// Pre-fill for set i, after what's already typed. Weight: this session's previous set, the plan's target, then last time.
+// Reps and seconds aim at the plan before falling back to what was done.
 function setDefaults(row, i) {
   const sets = row.log?.sets || [];
   const s = sets[i] || {};
@@ -171,13 +171,15 @@ function setDefaults(row, i) {
   const lastSets = (row.last?.sets || []).filter((x) => x.done);
   const lastSame = lastSets[i] || lastSets[lastSets.length - 1];
   return {
-    w: s.w ?? prev?.w ?? lastSame?.w ?? row.it.weight ?? null,
+    w: s.w ?? prev?.w ?? planWeight(row) ?? lastSame?.w ?? null,
     r: s.r ?? row.p.reps ?? prev?.r ?? lastSame?.r ?? null,
     s: s.s ?? row.p.secs ?? prev?.s ?? lastSame?.s ?? null,
   };
 }
+const rxLine = (row) => `${row.rx}${planWeight(row) ? ` @ ${planWeight(row)}` : ''}`;
+const dayWord = (k) => (k === todayKey() ? 'Today' : fmtDate(k, { weekday: 'long' }));
 
-export function WorkoutView({ store, date, blockId, onBack, onDone }) {
+export function WorkoutView({ store, date, blockId, startedAt, onBack, onDone }) {
   const day = M.getDay(store, date);
   const block = day.blocks.find((b) => b.id === blockId);
   const session = block && M.getSession(store, block.sessionId);
@@ -190,18 +192,33 @@ export function WorkoutView({ store, date, blockId, onBack, onDone }) {
   const setMode = (m) => { setModeState(m); ls.set('kp:woMode', m); };
   const [e, setE] = useState(() => {
     const prev = M.blockLog(store, date, blockId);
+    // A finished log keeps its times when it is corrected later. A skipped or half one picked up again is timed as a new session.
+    const resumed = !!prev?.status && prev.status !== 'done';
     return { items: {}, extra: [], rpe: null, note: '', ...(prev || {}), sessionId: block?.sessionId || null, title: block?.title, cat: block?.cat,
-      plannedMin: block ? M.trainingMinutes([block]) : 0, startedAt: prev?.startedAt || new Date().toISOString() };
+      plannedMin: block ? M.trainingMinutes([block]) : 0, startedAt: (!resumed && prev?.startedAt) || startedAt || new Date().toISOString(),
+      finishedAt: resumed ? null : prev?.finishedAt ?? null };
   });
   const first = useRef(true);
   const dirty = useRef(false);
   const eRef = useRef(e);
   eRef.current = e;
-  const persist = useRef(debounce((v) => M.setBlockLog(store, date, blockId, v), 600)).current;
+  // A block moved to another day while open keeps logging to the day it is on now.
+  const dateRef = useRef(date);
+  dateRef.current = date;
+  const persist = useRef(debounce((v) => M.setBlockLog(store, dateRef.current, blockId, v), 600)).current;
   const lastCache = useRef({});
 
   useEffect(() => { if (first.current) { first.current = false; return; } dirty.current = true; persist(e); }, [e]);
   useEffect(() => () => { if (dirty.current) persist.flush(eRef.current); }, []);
+
+  // Android can kill a hidden tab, so the last set goes to the store and out to the server as soon as the page hides.
+  useEffect(() => {
+    const save = () => { if (!dirty.current) return; dirty.current = false; persist.flush(eRef.current); store.persistNow(); };
+    const vis = () => { if (document.visibilityState === 'hidden') save(); };
+    document.addEventListener('visibilitychange', vis);
+    window.addEventListener('pagehide', save);
+    return () => { document.removeEventListener('visibilitychange', vis); window.removeEventListener('pagehide', save); };
+  }, []);
 
   useEffect(() => {
     let lock = null;
@@ -239,15 +256,17 @@ export function WorkoutView({ store, date, blockId, onBack, onDone }) {
   ];
 
   const logSet = (row, i, vals, { rest = true } = {}) => {
-    const sets = row.log?.sets?.length ? [...row.log.sets] : Array.from({ length: row.p.sets || 1 }, () => ({}));
+    const sets = row.log?.sets?.length ? [...row.log.sets] : Array.from({ length: setCount(row) }, () => ({}));
     while (sets.length <= i) sets.push({});
     sets[i] = { ...sets[i], ...vals, done: true };
     setItem(row, { sets });
     if (row.load && vals.w && vals.r) {
       const est = e1rm(vals.w, vals.r);
-      const before = Math.max(row.best.e1rm, ...doneOf(row).filter((_, j) => j !== i).map((s) => e1rm(s.w, s.r)));
+      // Index before filtering: the other done sets in this session, not counting the one being logged.
+      const others = (row.log?.sets || []).filter((s, j) => j !== i && s.done);
+      const before = Math.max(row.best.e1rm, ...others.map((s) => e1rm(s.w, s.r)));
       if (row.best.e1rm > 0 && est > before) toast(`New PR on ${row.name}: ${vals.w} × ${vals.r} (est. 1RM ${est} ${units})`, { ms: 5000 });
-      else if (row.best.w > 0 && vals.w > Math.max(row.best.w, ...doneOf(row).filter((_, j) => j !== i).map((s) => s.w || 0))) toast(`Heaviest ${row.name} yet: ${vals.w} ${units}`, { ms: 4000 });
+      else if (row.best.w > 0 && vals.w > Math.max(row.best.w, ...others.map((s) => s.w || 0))) toast(`Heaviest ${row.name} yet: ${vals.w} ${units}`, { ms: 4000 });
     }
     if (rest) restTimer(row.rest, row.name);
   };
@@ -256,18 +275,29 @@ export function WorkoutView({ store, date, blockId, onBack, onDone }) {
   const removeExtra = (id) => setE((v) => { const items = { ...v.items }; delete items[id]; return { ...v, extra: v.extra.filter((x) => x.id !== id), items }; });
 
   const finish = (status) => {
-    const v = { ...e, status, finishedAt: new Date().toISOString() };
+    // Fixing a rep in an old log keeps its first finish time, so its duration stays what it was.
+    const v = { ...e, status, finishedAt: e.status === 'done' && e.finishedAt ? e.finishedAt : new Date().toISOString() };
     // The view unmounts before setE re-renders, so the unmount flush would otherwise write the pre-finish copy.
     eRef.current = v;
     dirty.current = false;
     persist.flush(v);
+    endRest();
     onDone(status);
+  };
+  // For a mis-tapped start or a log that shouldn't count. The pending save is cancelled so it can't write the entry back.
+  const discard = () => {
+    persist.cancel();
+    dirty.current = false;
+    const undo = M.deleteWorkout(store, dateRef.current, blockId);
+    endRest();
+    onDone(null);
+    toast(e.status ? 'Workout log deleted' : 'Workout discarded', { action: 'Undo', onAction: undo, ms: 6000 });
   };
 
   let total = 0, done = 0;
   for (const part of parts) for (const row of part.rows) {
     if (row.p.skip) continue;
-    if (isSetRow(row)) { const n = Math.max(row.p.sets, row.log?.sets?.length || 0); total += n; done += Math.min(n, doneOf(row).length); }
+    if (isSetRow(row)) { const n = setCount(row); total += n; done += Math.min(n, doneOf(row).length); }
     else { total += 1; done += row.log?.done ? 1 : 0; }
   }
 
@@ -280,7 +310,7 @@ export function WorkoutView({ store, date, blockId, onBack, onDone }) {
         <h1>${block.title}</h1>
         <span class="meta">${date === todayKey() ? 'Today' : fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' })}${pw && !pw.before && !pw.after ? ` · ${pw.label}` : ''}</span>
       </div>
-      <${Clock} since=${e.startedAt} />
+      <${Clock} since=${e.startedAt} until=${e.status === 'done' ? e.finishedAt : null} />
       <${Btn} kind="primary" onClick=${() => finish('done')}>Finish</${Btn}>
     </header>
     <div class="wo-head">
@@ -288,7 +318,7 @@ export function WorkoutView({ store, date, blockId, onBack, onDone }) {
       <span class="muted small">${done}/${total} sets</span>
       <${Segmented} label="Logging view" value=${mode} onChange=${setMode} options=${[['focus', 'Focus'], ['list', 'List']]} />
     </div>
-    ${day.note && html`<div class="callout"><b>Today:</b> ${day.note}</div>`}
+    ${day.note && html`<div class="callout"><b>${dayWord(date)}:</b> ${day.note}</div>`}
     ${block.note && html`<div class="callout"><b>This block:</b> ${block.note}</div>`}
     ${session?.bring && html`<p class="plan-line"><b>Bring</b> ${session.bring}</p>`}
     ${session?.warmup && html`<${CheckRow} label="Warm-up" text=${session.warmup} done=${e.items._warmup?.done} onToggle=${() => setRaw('_warmup', { done: !e.items._warmup?.done })} />`}
@@ -314,19 +344,21 @@ export function WorkoutView({ store, date, blockId, onBack, onDone }) {
           placeholder="How did it go? Anything that hurt?"></textarea>
       </label>
       <div class="wo-actions">
+        <${Btn} kind="danger" icon="trash" onClick=${discard}>${e.status ? 'Delete' : 'Discard'}</${Btn}>
+        <span class="grow"></span>
         <${Btn} kind="quiet" onClick=${() => finish('skipped')}>Skipped</${Btn}>
-        <${Btn} kind="quiet" onClick=${() => finish('partial')}>Partial</${Btn}>
+        <${Btn} kind="quiet" onClick=${() => finish('partial')}>Half</${Btn}>
         <${Btn} kind="primary" icon="check" onClick=${() => finish('done')}>Finish workout</${Btn}>
       </div>
     </div>
   </section>`;
 }
 
-// Ticks on its own so the rest of the logger doesn't re-render every second.
-function Clock({ since }) {
+// Ticks on its own so the rest of the logger doesn't re-render every second. A finished log shows its stored length.
+function Clock({ since, until }) {
   const [, tick] = useState(0);
-  useEffect(() => { const id = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(id); }, []);
-  const s = Math.max(0, Math.floor((Date.now() - new Date(since)) / 1000));
+  useEffect(() => { if (until) return; const id = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(id); }, [until]);
+  const s = Math.max(0, Math.floor(((until ? new Date(until) : Date.now()) - new Date(since)) / 1000));
   return html`<span class="wo-clock" aria-label="Elapsed time">${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}</span>`;
 }
 
@@ -373,35 +405,37 @@ function ItemLog({ row, units, onChange, onLog, onUnset, onRemove }) {
   if (!isSetRow(row)) {
     return html`<${CheckRow} label=${row.name} text=${[row.rx && (it.byWeek || row.extra) ? row.rx : '', it.cue].filter(Boolean).join(' · ')} done=${row.log?.done} onToggle=${() => onChange({ done: !row.log?.done })} />`;
   }
-  const sets = row.log?.sets?.length ? row.log.sets : Array.from({ length: p.sets }, () => ({}));
+  const sets = row.log?.sets?.length ? row.log.sets : Array.from({ length: setCount(row) }, () => ({}));
   const setAt = (i, patch) => onChange({ sets: sets.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
   const toggle = (i) => {
     if (sets[i].done) return onUnset(row, i);
     const d = setDefaults(row, i);
     onLog(row, i, row.kind === 'time' ? { s: d.s, ...(row.load ? { w: d.w } : {}) } : { r: d.r, ...(row.load ? { w: d.w } : {}) });
   };
-  const lastW = (row.last?.sets || []).filter((s) => s.done && s.w).map((s) => s.w);
   const unit = row.kind === 'time' ? 'sec' : 'reps';
   return html`<div class="item">
     <div class="item-head">
-      <span class="item-name">${row.name}${overload(row) && html` <span class="badge up" title="Beat last time">↑ vs last</span>`}</span>
-      <span class="rx">${row.rx}</span>
+      <span class="item-name">${row.name}${overload(row) && html` <span class="badge up" title="Beat last time"><${Icon} name="up" size=${12} /> vs last</span>`}</span>
+      <span class="rx">${rxLine(row)}</span>
     </div>
     ${row.swapped && html`<p class="muted small">Swapped in for ${it.name}</p>`}
     ${it.cue && html`<p class="cue">${it.cue}</p>`}
     ${lastLine(row) && html`<p class="last">${lastLine(row)}</p>`}
     <div class="sets">
-      ${sets.map((s, i) => html`<div class=${`set ${s.done ? 'on' : ''}`}>
-        <span class="set-n">${i + 1}${p.perSide ? html`<small>/side</small>` : ''}</span>
+      ${sets.map((s, i) => {
+        // Placeholders show exactly what the check button will log.
+        const d = setDefaults(row, i);
+        return html`<div class=${`set ${s.done ? 'on' : ''}`}>
+        <span class="set-n">${i + 1}${p.perSide ? html`<small>/side</small>` : ''}${isPR(row, s) ? html`<span class="badge pr">PR</span>` : ''}</span>
         ${row.load && html`<label class="set-in"><input type="number" inputmode="decimal" step="2.5" min="0" value=${s.w ?? ''}
-            placeholder=${lastW[i] ?? lastW[lastW.length - 1] ?? units} onChange=${(ev) => setAt(i, { w: ev.target.value === '' ? null : +ev.target.value })} aria-label=${`Set ${i + 1} weight`} /><span>${units}</span></label>`}
+            placeholder=${d.w ?? units} onChange=${(ev) => setAt(i, { w: ev.target.value === '' ? null : +ev.target.value })} aria-label=${`Set ${i + 1} weight`} /><span>${units}</span></label>`}
         <label class="set-in"><input type="number" inputmode="numeric" min="0" value=${(row.kind === 'time' ? s.s : s.r) ?? ''}
-            placeholder=${(row.kind === 'time' ? p.secs : p.reps) ?? '–'}
+            placeholder=${(row.kind === 'time' ? d.s : d.r) ?? '–'}
             onChange=${(ev) => setAt(i, row.kind === 'time' ? { s: ev.target.value === '' ? null : +ev.target.value } : { r: ev.target.value === '' ? null : +ev.target.value })}
             aria-label=${`Set ${i + 1} ${unit}`} /><span>${unit}</span></label>
-        ${isPR(row, s) ? html`<span class="badge pr">PR</span>` : ''}
         <button type="button" class="set-done" onClick=${() => toggle(i)} aria-pressed=${!!s.done} aria-label=${`Set ${i + 1} done`}><${Icon} name="check" size=${18} /></button>
-      </div>`)}
+      </div>`;
+      })}
       <div class="item-tools">
         <button type="button" class="set-add" onClick=${() => onChange({ sets: [...sets, {}] })}>+ Set</button>
         ${!row.extra && html`<button type="button" class="set-add" onClick=${() => setSwapping((v) => !v)}><${Icon} name="repeat" size=${14} /> Swap</button>`}
@@ -419,7 +453,7 @@ function FocusView({ parts, units, onLog, onCheck, onSwap, onFinish, add }) {
   for (const part of parts) for (const row of part.rows) {
     if (row.p.skip) continue;
     if (!isSetRow(row)) steps.push({ row, part, i: -1 });
-    else { const n = Math.max(row.p.sets, row.log?.sets?.length || 0); for (let i = 0; i < n; i++) steps.push({ row, part, i, n }); }
+    else { const n = setCount(row); for (let i = 0; i < n; i++) steps.push({ row, part, i, n }); }
   }
   const isDone = (st) => (st.i < 0 ? !!st.row.log?.done : !!st.row.log?.sets?.[st.i]?.done);
   const nextOpen = (from) => {
@@ -481,10 +515,10 @@ function FocusStep({ st, units, done, onLog, onCheck, onSwap }) {
   return html`<div class=${`card focus-card cat-${row.load ? 'gym' : 'gk'}`}>
     <div class="focus-top">
       <h3>${row.name}</h3>
-      ${!row.extra && html`<button type="button" class="icon-btn sm" onClick=${() => setSwapping((v) => !v)} aria-label="Swap exercise" title="Swap exercise"><${Icon} name="repeat" size=${18} /></button>`}
+      ${!row.extra && html`<button type="button" class="icon-btn" onClick=${() => setSwapping((v) => !v)} aria-label="Swap exercise" title="Swap exercise"><${Icon} name="repeat" size=${18} /></button>`}
     </div>
     ${row.swapped && html`<p class="muted small">Swapped in for ${row.it.name}</p>`}
-    <p class="focus-rx"><span class="rx">${row.rx}</span>${i >= 0 && html`<span>Set <b>${i + 1}</b> of ${n}${row.p.perSide ? ' · each side' : ''}</span>`}${done && html`<span class="status-pill st-done">Logged</span>`}</p>
+    <p class="focus-rx"><span class="rx">${rxLine(row)}</span>${i >= 0 && html`<span>Set <b>${i + 1}</b> of ${n}${row.p.perSide ? ' · each side' : ''}</span>`}${done && html`<span class="status-pill st-done">Logged</span>`}</p>
     ${row.it.cue && html`<p class="cue">${row.it.cue}</p>`}
     ${lastLine(row) && html`<p class="last">${lastLine(row)}</p>`}
     ${swapping && html`<${SwapPicker} row=${row} onPick=${(nm) => { onSwap(nm); setSwapping(false); }} />`}

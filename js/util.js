@@ -71,19 +71,21 @@ export function programWeek(program, dateKey) {
   const wk = Math.floor(d / 7) + 1;
   if (wk > (program.weeks || 4)) return { wk, after: true, label: 'Block finished' };
   const deload = (program.deload || []).includes(wk);
-  return { wk, deload, label: `Wk ${wk} of ${program.weeks}${deload ? ' · Deload' : ''}` };
+  return { wk, deload, label: `Wk ${wk}/${program.weeks}${deload ? ' · Deload' : ''}` };
 }
 
 // The prescription an item has for a given program week. Weeks outside the block use the nearest week.
+// A blank week repeats the closest earlier week, as the session editor's placeholder shows. '—' still means not this week.
 export function rxFor(item, wk) {
   const arr = item?.byWeek;
   if (!arr || !arr.length) return item?.rx || '';
-  const i = clamp((wk || 1), 1, arr.length) - 1;
-  return arr[i] || '';
+  for (let i = clamp((wk || 1), 1, arr.length) - 1; i >= 0; i--) if (arr[i]) return arr[i];
+  return arr.find(Boolean) || item?.rx || '';
 }
-export const partNoteFor = (part, wk) => (part?.noteByWeek?.length ? rxFor({ byWeek: part.noteByWeek }, wk) : '');
+export const partNoteFor = (part, wk) => part?.noteByWeek?.[clamp(wk || 1, 1, part.noteByWeek.length) - 1] || '';
 
-// Turn '4x6-8', '3x45 sec/side', '12/side', '3 rounds' into something loggable.
+// Prescriptions stay free text ('4x6-8', '3x45 sec/side', '12/side', '3 rounds') so Claude and the editor can write them
+// the way a coach would; the logger reads set and rep counts back out of them here.
 export function parseRx(rx) {
   if (!rx) return { text: '' };
   const s = rx.toLowerCase().trim();
@@ -120,13 +122,16 @@ export function muscleZone(sets) {
 }
 
 // For exercises without a muscle tag (added on the fly, swapped in, or imported from FitTracker).
+// First match wins, so each phrase sits above the broader words it contains ('leg raise' before 'leg', 'reverse fly' before 'fly').
 const MUSCLE_WORDS = [
-  ['Hamstrings', /rdl|romanian|leg curl|hamstring|good morning|nordic|stiff/], ['Glutes', /glute|hip thrust|bridge|kickback/],
-  ['Calves', /calf|calves/], ['Adductors', /copenhagen|adduct/], ['Quads', /squat|leg press|lunge|split|step.?up|leg ext|hack|quad|legs?\b/],
-  ['Chest', /bench|chest|push.?up|fly|dip|pec|incline|decline/], ['Triceps', /tricep|pushdown|skull|close.?grip|extension/],
-  ['Forearms', /wrist|grip|forearm|squeeze|farmer/], ['Biceps', /curl|bicep/],
-  ['Shoulders', /shoulder|overhead|ohp|lateral|raise|face pull|arnold|military|delt/],
-  ['Back', /row|pull|lat|deadlift|chin|back|shrug/], ['Core', /plank|core|ab|crunch|dead ?bug|pallof|sit.?up|rotation/],
+  ['Adductors', /copenhagen|adduct/], ['Shoulders', /external rotation|internal rotation|rotator/],
+  ['Core', /leg raise|knee raise|plank|\babs?\b|crunch|dead ?bug|pallof|sit.?up|rotation|twist|wood ?chop|core/],
+  ['Hamstrings', /rdl|romanian|leg curl|hamstring|good morning|nordic|stiff/], ['Triceps', /tricep|pushdown|skull|close.?grip|dips?\b/],
+  ['Glutes', /glute|hip thrust|bridge|kickback|abduct/], ['Calves', /calf|calves|pogo/],
+  ['Quads', /squat|leg press|lunge|split|step.?up|leg ext|hack|quad|bound|jump|hop|skater|legs?\b/],
+  ['Shoulders', /rear delt|reverse fly|face pull|shoulder|overhead press|push press|ohp|raise|arnold|military|upright|delt/],
+  ['Chest', /bench|chest|push.?up|fly|crossover|pec|incline|decline/], ['Forearms', /wrist|forearm|squeeze|farmer|gripper/],
+  ['Biceps', /curl|bicep/], ['Back', /row|pull|\blat|deadlift|chin|back|shrug/],
 ];
 export function guessMuscle(name) {
   const s = (name || '').toLowerCase();
@@ -178,15 +183,18 @@ function hour24(h, mer) {
   return h;
 }
 
-function score(queryWords, keys) {
+// How many of a session's keys the typed words hit, and which words did the hitting.
+function hits(queryWords, keys) {
   let n = 0;
+  const used = new Set();
   for (const k of keys) {
-    if (queryWords.some((q) => q.length >= 3 && (k.startsWith(q) || q.startsWith(k.slice(0, Math.max(3, k.length - 1)))))) n++;
+    const q = queryWords.find((w) => w.length >= 3 && (k.startsWith(w) || w.startsWith(k.slice(0, Math.max(3, k.length - 1)))));
+    if (q) { n++; used.add(q); }
   }
-  return n;
+  return { n, used };
 }
 
-// 'thu 4pm legs plyo', 'study 3-5', 'mon wed 7:30-9pm practice'
+// 'thu 4pm plyo legs', 'study 3-5', 'mon wed 7:30-9pm practice'
 export function parseQuick(text, { today, fallbackDate, sessions = [], lifePresets = [], defaultRemind = 30 }) {
   let s = ' ' + (text || '').toLowerCase().replace(/,/g, ' ') + ' ';
   const dates = [];
@@ -225,34 +233,47 @@ export function parseQuick(text, { today, fallbackDate, sessions = [], lifePrese
     }
   }
 
-  const q = words(s).filter((w) => !['at', 'from', 'to', 'the', 'for', 'and', 'my', 'pm', 'am'].includes(w));
-  let best = null, bestScore = 0;
-  for (const ses of sessions) {
-    const sc = score(q, [...words(ses.title), ...(ses.keywords || [])]);
-    if (sc > bestScore) { best = { kind: 'session', ses }; bestScore = sc; }
+  const q = words(s).filter((w) => !['at', 'from', 'to', 'the', 'for', 'and', 'my', 'pm', 'am', 'then'].includes(w));
+  // Every session or preset the words name, each word used once, kept in the order typed: 'plyo legs' is two blocks
+  // back to back. Sessions are checked first, so they win a tie with a life preset.
+  const cands = [
+    ...sessions.map((ses) => ({ ses, keys: [...words(ses.title), ...(ses.keywords || [])] })),
+    ...lifePresets.map((p) => ({ p, keys: [...words(p.title), ...(p.keywords || [])] })),
+  ];
+  const picks = [];
+  for (let left = q; ;) {
+    let best = null;
+    for (const c of cands) {
+      if (picks.some((x) => x.c === c)) continue;
+      const h = hits(left, c.keys);
+      if (h.n > (best?.n || 0)) best = { c, ...h };
+    }
+    if (!best) break;
+    picks.push({ c: best.c, at: Math.min(...[...best.used].map((w) => q.indexOf(w))) });
+    left = left.filter((w) => !best.used.has(w));
   }
-  for (const p of lifePresets) {
-    const sc = score(q, [...words(p.title), ...(p.keywords || [])]);
-    if (sc > bestScore) { best = { kind: 'life', p }; bestScore = sc; }
-  }
+  picks.sort((a, b) => a.at - b.at);
 
   const leftover = q.join(' ');
-  let block = { title: leftover ? leftover[0].toUpperCase() + leftover.slice(1) : 'New block', cat: 'life', remind: null };
-  let dur = 60;
-  if (best?.kind === 'session') {
-    const ses = best.ses;
-    block = { title: ses.title, cat: ses.cat, sessionId: ses.id, location: ses.location || '', remind: ses.remind ?? (isTraining(ses.cat) ? defaultRemind : null), remindNote: ses.remindNote || '' };
-    dur = ses.duration || 60;
-  } else if (best?.kind === 'life') {
-    block = { title: best.p.title, cat: best.p.cat, remind: null };
-    dur = best.p.dur || 60;
+  const made = picks.length ? picks.map(({ c }) => (c.ses
+    ? { block: { title: c.ses.title, cat: c.ses.cat, sessionId: c.ses.id, location: c.ses.location || '', remind: c.ses.remind ?? (isTraining(c.ses.cat) ? defaultRemind : null), remindNote: c.ses.remindNote || '' }, dur: c.ses.duration || 60 }
+    : { block: { title: c.p.title, cat: c.p.cat, remind: null }, dur: c.p.dur || 60 }))
+    : [{ block: { title: leftover ? leftover[0].toUpperCase() + leftover.slice(1) : 'New block', cat: 'life', remind: null }, dur: 60 }];
+  if (start == null) return { error: 'Add a time, like “4pm” or “3-5”.', block: made[0].block, dates };
+  // One block takes a typed range as is. Several are chained from the start time at their own lengths.
+  const blocks = [];
+  let t = start;
+  for (const m of made) {
+    const e = Math.min(made.length === 1 && end != null ? end : t + m.dur, 1440);
+    if (e <= t) break;
+    blocks.push({ ...m.block, start: fromMin(t), end: fromMin(e) });
+    t = e;
   }
-  if (start == null) return { error: 'Add a time, like “4pm” or “3-5”.', block, dates };
-  if (end == null) end = Math.min(start + dur, 1440);
+  if (!blocks.length) return { error: 'That time leaves no room before midnight.', block: made[0].block, dates };
   return {
     dates: dates.length ? [...new Set(dates)].sort() : [fallbackDate || today],
-    block: { ...block, start: fromMin(start), end: fromMin(Math.min(end, 1440)) },
-    matched: !!best,
+    block: blocks[0], blocks,
+    matched: picks.length > 0,
   };
 }
 
@@ -260,6 +281,7 @@ export function debounce(fn, ms) {
   let t;
   const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
   d.flush = (...a) => { clearTimeout(t); fn(...a); };
+  d.cancel = () => clearTimeout(t);
   return d;
 }
 

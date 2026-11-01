@@ -1,9 +1,9 @@
 // App files go network-first so a deploy shows up on the next open; the offline copy is the fallback.
 // CDN modules and fonts are versioned URLs, so cache-first is safe. Supabase traffic is never cached.
-const CACHE = 'kp-v2';
+const CACHE = 'kp-v3';
 const SHELL = ['./', './index.html', './css/app.css', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png',
   './js/app.js', './js/lib.js', './js/config.js', './js/util.js', './js/ui.js', './js/store.js', './js/model.js', './js/seed.js',
-  './js/theme.js', './js/calendar.js', './js/workout.js', './js/views.js', './js/library.js'];
+  './js/theme.js', './js/calendar.js', './js/workout.js', './js/gym.js', './js/views.js', './js/library.js'];
 const CDN = /^(https:\/\/cdn\.jsdelivr\.net|https:\/\/fonts\.(googleapis|gstatic)\.com)\//;
 
 self.addEventListener('install', (e) => {
