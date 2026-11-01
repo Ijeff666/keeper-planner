@@ -21,7 +21,7 @@ create policy "own docs" on public.docs for all to authenticated
 
 -- The server stamps every write, so the app can tell when a doc it is editing was changed by Claude in the meantime.
 -- Writes that don't come from a signed-in app session (SQL from Claude, the dashboard) count as Claude's.
-create or replace function public.docs_stamp() returns trigger language plpgsql as $$
+create or replace function public.docs_stamp() returns trigger language plpgsql set search_path = '' as $$
 begin
   new.updated_at := now();
   if (select auth.uid()) is null and coalesce(new.updated_by, 'app') = 'app' then new.updated_by := 'claude'; end if;
